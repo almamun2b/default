@@ -36,7 +36,7 @@ npm test
 
 ## Generate a website list for any sector, then scrape its emails
 
-The tool is sector-agnostic: any list of websites (healthcare, dealers, trades, retail, hospitality, ...) in AU, NZ or elsewhere. Lists live in `websites/<topic>-<au|nz>/`; the rules are in AGENTS.md "Building website lists". An existing list is never edited: more sites for the same topic go into `<list>-2.<cc>.csv`; all not-yet-scraped additions collect in one numbered file (`new-list.ts --append`); `-3` starts only after `-2` has been scraped. Sites for places with no website are found by web search: [finding-websites-by-web-search.md](finding-websites-by-web-search.md).
+The tool is sector-agnostic: any list of websites (healthcare, dealers, trades, retail, hospitality, ...) in AU, NZ or elsewhere. Lists live in `websites/<topic>-<au|nz>/`; the rules are in AGENTS.md "Building website lists". An existing list is never edited: more sites for the same topic go into `<list>-2.<cc>.csv`; all not-yet-scraped additions collect in one numbered file (`new-list.ts --append`); `-3` starts only after `-2` has been scraped. The full method for any sector and country is [finding-target-websites.md](finding-target-websites.md) (Overture first, then OpenStreetMap, web search last); sites for places with no website are found by web search: [finding-websites-by-web-search.md](finding-websites-by-web-search.md).
 
 1. Fetch candidates from OpenStreetMap. Describe the sector with one or more `--match` selectors (`key~regex` or `key=value`, conditions joined by `&&`); a place with a website tag that fits any selector is kept. About 10–30 minutes per country; add `NODE_USE_ENV_PROXY=1` only behind an HTTP proxy:
    ```bash
@@ -60,6 +60,16 @@ The tool is sector-agnostic: any list of websites (healthcare, dealers, trades, 
 6. Scrape the emails only when ready: `npm run scrape -- websites/<category>/<list>.<cc>.csv` (a deep crawl takes roughly 1–2 hours per 150 sites).
 
 ## Open items
+
+- **Cafes, mechanics, tyre shops, AU and NZ: lists generated 2026-11-05 (target 10,000, exceeded).** Overture Maps (release 2026-10-21.0) gave the bulk, merged into the one unscraped numbered file per list; chain rows were split into `*-chains` lists. Existing lists validated first (`scripts/validate-lists.ts`: no duplicates). Sites now (all files, chains included):
+
+  | | AU | NZ |
+  |---|---|---|
+  | cafes (`cafes-<cc>/`: `cafes`, `cafes-2`, `cafe-chains`) | 15,131 | 2,583 |
+  | tyre shops (`tyre-shops-<cc>/`: `tyre-shops`, `-2`, `tyre-chains`) | 2,809 | 511 |
+  | mechanics (`auto-repair-<cc>/`: `mechanics`, `-2`, specialists, `chains-franchises` + `-2`) | 18,061 | 3,119 |
+
+  About 80 % of a 300-site sample resolves in DNS; the rest fail fast in the scraper. Directory, shortener and `.gov.au`/`.govt.nz` sites are now blocked in `new-list.ts`, and 95 sites with another country's domain (29 `.com.au` in NZ lists, 66 in AU/NZ lists such as `.co.uk`, `.co.nz`, `.jp`) were removed with `validate-lists.ts --only-country`. Email scraping has not been run. Chains lists are low value (head-office emails); scrape them last. Method: [finding-target-websites.md](finding-target-websites.md).
 
 - **Pizza, AU and NZ: lists generated 2026-10-29, AU still short of the target.** Owner target: AU 5,000–8,100 sites, NZ as many as exist. Sites now in the categories (all files, `pizza-shops*` + `pizza-chains*`):
 

@@ -1,7 +1,9 @@
 /**
  * Candidate businesses of any sector, with a website, from OpenStreetMap (Overpass API), for scripts/new-list.ts.
  *
- *   npx tsx scripts/fetch-osm-places.ts <au|nz> <out.csv> --match=<selector> [--match=<selector> ...]
+ *   npx tsx scripts/fetch-osm-places.ts <au|nz|any> <out.csv> --match=<selector> [--match=<selector> ...] [--bbox=south,west,north,east]
+ *
+ * `au` and `nz` have built-in boxes; for any other country pass the code (only a label) and --bbox, e.g. Canada: --bbox=41.6,-141,83.2,-52.
  *
  * Each --match is one way to qualify: `key~regex` (case-insensitive regex on a tag) or `key=value`, with several
  * conditions joined by `&&`. A place qualifies when any --match fits and it has a website tag.
@@ -90,8 +92,14 @@ const tiles = ([s, w, n, e]: Box): Box[] => {
 const args = process.argv.slice(2);
 const matches = args.filter((a) => a.startsWith('--match=')).map((a) => a.slice('--match='.length));
 const [cc, out] = args.filter((a) => !a.startsWith('--'));
-if (!COUNTRIES[cc ?? ''] || !out || !matches.length) {
-  console.error("usage: fetch-osm-places.ts <au|nz> <out.csv> --match='key~regex' [--match='k=v&&k2~regex' ...]");
+const bboxArg = args.find((a) => a.startsWith('--bbox='))?.slice('--bbox='.length).split(',').map(Number);
+if (bboxArg && (bboxArg.length !== 4 || bboxArg.some(Number.isNaN))) {
+  console.error('--bbox needs south,west,north,east in degrees');
+  process.exit(2);
+}
+const boxes: Box[] | undefined = bboxArg ? [bboxArg as Box] : COUNTRIES[cc ?? ''];
+if (!boxes || !out || !matches.length) {
+  console.error("usage: fetch-osm-places.ts <au|nz|code> <out.csv> --match='key~regex' [--match='k=v&&k2~regex' ...] [--bbox=south,west,north,east]");
   process.exit(2);
 }
 matches.forEach(cond); // fail on a bad selector before any request
@@ -131,6 +139,6 @@ async function run(box: Box): Promise<void> {
   if (elements.length) console.error(`tile ${id}: ${elements.length} places, ${found.length} new with a website (total ${places.size})`);
 }
 
-for (const box of COUNTRIES[cc].flatMap(tiles)) await run(box);
+for (const box of boxes.flatMap(tiles)) await run(box);
 fs.writeFileSync(out, stringify([...places.values()], { header: true, columns: ['name', 'website'] }));
 console.error(`${places.size} candidates → ${out}${failed.length ? `; ${failed.length} tiles failed (run again to retry): ${failed.map((b) => b.join(',')).join(' | ')}` : ''}`);
