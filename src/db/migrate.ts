@@ -204,7 +204,7 @@ function importPages(db: Db, s: Source, report: MigrationReport): LedgerEntry {
 function importCache(db: Db, s: Source, report: MigrationReport): LedgerEntry {
   const rows = readLegacyCache(s.file);
   const at = fs.statSync(s.file).mtimeMs;
-  const who = { cat: s.cat!, list: s.list!, g: s.g!, run: 'legacy' };
+  const who = { cat: s.cat!, list: s.list!, generation: s.g!, run: 'legacy' };
   for (const r of rows) db.sites.append(who, r, at);
   report.rows += rows.length;
   log.info({ rows: rows.length }, `${s.key}: ${rows.length} site rows imported as generation ${s.g}`);
@@ -214,7 +214,7 @@ function importCache(db: Db, s: Source, report: MigrationReport): LedgerEntry {
 function importMarker(db: Db, s: Source, report: MigrationReport): LedgerEntry {
   const iso = /\d{4}-\d\d-\d\dT[\d:.]+Z/.exec(fs.readFileSync(s.file, 'utf8'))?.[0];
   const a = iso ? Date.parse(iso) : fs.statSync(s.file).mtimeMs;
-  db.runs.append({ t: 'list.start', run: 'legacy', a, cat: s.cat, list: s.list, g: s.g, mode: 'scrape', legacy: true, resumed: false, fresh: false });
+  db.runs.append({ type: 'list.start', run: 'legacy', at: a, cat: s.cat, list: s.list, generation: s.g, mode: 'scrape', legacy: true, resumed: false, fresh: false });
   report.interrupted.push(`${s.cat}/${s.list}`);
   log.info({ list: `${s.cat}/${s.list}` }, `${s.key}: an interrupted scrape; the next run resumes it`);
   return { at: new Date().toISOString(), size: s.size };
@@ -232,23 +232,23 @@ function importLog(db: Db, s: Source, report: MigrationReport): LedgerEntry {
     const text = block.replace(/^\n+/, '').replace(/\s+$/, '');
     if (!text) continue;
     const h = HEADER.exec(text);
-    let ev: { t: string; [k: string]: unknown };
+    let ev: { type: string; [k: string]: unknown };
     if (h) {
       const n = (re: RegExp) => { const m = re.exec(text); return m ? m.slice(1).map(Number) : undefined; };
       const websites = n(/Websites : (\d+) total \| (\d+) with emails \| (\d+) no emails found \| (\d+) failed/);
       const emails = n(/Emails {3}: (\d+) unique/);
       ev = {
-        t: 'list.end', cat: s.cat ?? h[2] ?? null, list: h[3], status: 'finished', mode: h[4].split(':')[0], a: stampMs(h[1]),
+        type: 'list.end', cat: s.cat ?? h[2] ?? null, list: h[3], status: 'finished', mode: h[4].split(':')[0], at: stampMs(h[1]),
         ...(websites || emails ? { counts: { ...(websites ? { sites: websites[0], withEmails: websites[1], noEmails: websites[2], failed: websites[3] } : {}), ...(emails ? { uniqueEmails: emails[0] } : {}) } } : {}),
         text,
       };
     } else if (/^=== unique /.test(text)) {
       const when = /^=== unique (\S+) — (\S+)/.exec(text);
-      ev = { t: 'unique.end', cat: s.cat, label: when?.[1] ?? base.slice('unique.'.length), a: when ? Date.parse(when[2]) : fs.statSync(s.file).mtimeMs, text };
+      ev = { type: 'unique.end', cat: s.cat, label: when?.[1] ?? base.slice('unique.'.length), at: when ? Date.parse(when[2]) : fs.statSync(s.file).mtimeMs, text };
     } else {
-      ev = { t: isUnique ? 'unique.end' : 'filter.end', cat: s.cat, list: isUnique ? undefined : base, a: fs.statSync(s.file).mtimeMs, text };
+      ev = { type: isUnique ? 'unique.end' : 'filter.end', cat: s.cat, list: isUnique ? undefined : base, at: fs.statSync(s.file).mtimeMs, text };
     }
-    db.runs.append({ run: 'legacy', legacy: true, ...ev, a: Number.isFinite(ev.a) ? (ev.a as number) : fs.statSync(s.file).mtimeMs });
+    db.runs.append({ run: 'legacy', legacy: true, ...ev, at: Number.isFinite(ev.at) ? (ev.at as number) : fs.statSync(s.file).mtimeMs });
     // a legacy list.end must not end a list that a later import marks as interrupted: markers are imported last
     events++;
   }

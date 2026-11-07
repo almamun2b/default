@@ -5,7 +5,7 @@ import { businessName, demoteRolePrefixes, extractFromDom, isGenericTitle, looks
 import { httpGet, type FailKind } from './http.js';
 import { log } from './logger.js';
 import { allowed, blockReason, loadRobots, robotsAllow, sitemapsOf, type RobotsBlock, type RobotsRules } from './robots.js';
-import type { Mode, PageRecord, PagesView } from './db/pages-repo.js';
+import { NOT_MODIFIED, type Mode, type PageRecord, type PagesView } from './db/pages-repo.js';
 import { loadSitemapUrls } from './sitemap.js';
 import { baseHost, canonical, crawlable, inSection, pageKey, priority, sameSite, sectionPrefix } from './urls.js';
 
@@ -293,7 +293,7 @@ async function runQueue(c: SiteCrawl, fetcher: Fetcher, maxPages: number, opts: 
         // A reused page still counts toward --max-pages, so a site is crawled exactly as it would be without the store.
         let skipped = false;
         const key = pageKey(new URL(item.url));
-        const fetchRecord = async (stale?: PageRecord): Promise<PageRecord | null> => {
+        const fetchRecord = async (stale?: PageRecord): Promise<PageRecord | typeof NOT_MODIFIED | null> => {
           const validators: Validators | undefined = stale && (stale.etag || stale.lastModified) ? { etag: stale.etag, lastModified: stale.lastModified } : undefined;
           const r = await fetcher(item.url, validators);
           if (!r) return null;
@@ -301,7 +301,7 @@ async function runQueue(c: SiteCrawl, fetcher: Fetcher, maxPages: number, opts: 
             opts.pages?.store.markGone(opts.pages.mode, key);
             return null;
           }
-          if (r.notModified && stale) return { ...stale, at: Date.now() }; // revalidated: the stored copy is current
+          if (r.notModified && stale) return NOT_MODIFIED; // revalidated: the stored copy is current, the store only renews its time
           if (r.url !== item.url) {
             // a redirect: don't fetch the target again, and don't take emails from another site or a disallowed page
             c.seen.add(canonical(new URL(r.url)));
@@ -315,7 +315,7 @@ async function runQueue(c: SiteCrawl, fetcher: Fetcher, maxPages: number, opts: 
         };
         const got = opts.pages
           ? await opts.pages.store.load(opts.pages.mode, key, opts.pages.cutoff, fetchRecord)
-          : await fetchRecord().then((rec) => (rec ? { rec, reused: false } : null));
+          : await fetchRecord().then((rec) => (rec && rec !== NOT_MODIFIED ? { rec, reused: false } : null));
         if (got === 'gone') {
           log.debug({ url: item.url }, 'skipping a page that is gone (404/410)');
           continue;

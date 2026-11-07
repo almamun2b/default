@@ -278,7 +278,7 @@ Every page the scraper fetches is kept in `results/db/pages.jsonl`, shared by al
 
 Reused pages count toward `--max-pages`, so a site gives the same result as it would without the store; only the requests are saved. The summary shows `N pages fetched + M reused`.
 
-**Revalidation.** A stored page older than 30 days (change it with `--revalidate=DAYS`) is asked about again the next time a crawl reaches it. If the server gave an `ETag` or `Last-Modified`, the request is conditional, and a `304 Not Modified` keeps the stored copy without downloading the page. `--revalidate` with no number asks again about every stored page, once in the run, and so does scraping a list again from scratch (`--force`, or naming a file that already has an output). Revalidated pages are appended; the file is never rewritten or deleted. Only one scraping run at a time can use the page store (`results/db/locks/pages.lock`); a second run stops with the usual "in use by another run" error.
+**Revalidation.** A stored page older than 30 days (change it with `--revalidate=DAYS`) is asked about again the next time a crawl reaches it. If the server gave an `ETag` or `Last-Modified`, the request is conditional, and a `304 Not Modified` keeps the stored copy without downloading the page. `--revalidate` with no number asks again about every stored page, once in the run, and so does scraping a list again from scratch (`--force`, or naming a file that already has an output). If the server sent new content (200) the new version replaces the stored one; on a 304 the stored record is kept and only its `fetchedAt` time becomes today's. The file is never deleted (see [the database](#the-database-and-resuming) for `npm run db:upgrade`). Only one scraping run at a time can use the page store (`results/db/locks/pages.lock`); a second run stops with the usual "in use by another run" error.
 
 ### Is a high concurrency setting safe?
 
@@ -536,11 +536,11 @@ jq -c 'select(.site == "https://example.co.nz/")' logs/scraper-2026-10-03.log
 
 ## The database and resuming
 
-Everything the scraper remembers is in `results/db/` (record layouts: [docs/db-schema.md](docs/db-schema.md)). The files are append-only JSON lines, shaped like tables so they can move to SQLite later:
+Everything the scraper remembers is in `results/db/` (record layouts: [docs/db-schema.md](docs/db-schema.md)). The files are JSON lines (the newest record wins; only the scraper itself ever changes written data), shaped like tables so they can move to SQLite later:
 
 | File | Meaning |
 |---|---|
-| `pages.jsonl` | Every page ever fetched, for all categories: emails, title, links, validators, when, and who fetched it (see [Pages are scraped once](#pages-are-scraped-once)). Never rewritten, rotated or deleted |
+| `pages.jsonl` | Every page ever fetched, for all categories: emails, title, links, validators, when, and who fetched it (see [Pages are scraped once](#pages-are-scraped-once)). Never rotated or deleted; a 304 revalidation renews a record's `fetchedAt` in place |
 | `pages.idx` | Hash index over `pages.jsonl` so it opens instantly. Derived: if deleted it is rebuilt from the pages (slow, once) |
 | `sites.jsonl` | One row per finished site of a list (category, list, generation, run, and the result: the site URL, final URL after redirects, business name, emails with names and where each was found, pages fetched, whether the browser was used, any error with its detail, and what is left to retry) |
 | `sites.idx` | Snapshot of where each current row is. Derived |
@@ -554,6 +554,7 @@ Output and database files hold personal data, so new ones are created readable b
 - **Interrupted runs resume automatically,** including interrupted `--force` re-scrapes. A list whose latest start has no end in the run history is interrupted: run the same command again (or a plain `npm run scrape`) and the sites already stored are skipped.
 - **A fresh re-scrape keeps the old results.** When a file with an existing output is scraped again (`--force`), it starts a new *generation* of the list's rows; the earlier generation stays in `sites.jsonl`, ignored.
 - **Outputs always use the current rules.** The CSV and summary re-apply the current email checks and name rules to every stored row, so after an update `--summary-only` cleans old outputs without re-scraping. Stored rows are never rewritten; a `--retry-*` run appends new rows (a site it will crawl again from scratch gets a `drop` row first, so an interrupted retry still redoes it), and rows it continues or re-crawls are kept until the retry's row supersedes them, so an interrupted retry loses nothing.
+- **Field names.** Records now use readable names (`pages.jsonl`: `version, pageKey, mode, fetchedAt, page`). Records written before 2026-11-07 used one-letter names (`v, k, m, a, d`) and are still read. `npm run db:upgrade` (`-- --dry-run` counts only) rewrites the files once into the readable names and drops page records a newer copy replaced; run it with no scrape running and keep a copy of `results/db/` first. The first run afterwards rebuilds `pages.idx` (slow once).
 - **Coming from the old layout** (`results/<category>/.cache`, `logs`, `emails`)? The first scrape imports it by itself, once; `npm run db:migrate` does the same on demand (`-- --dry-run` lists what it would import) and `npm run db:verify` checks that everything arrived. The old folders are only read, never changed or deleted by the import: remove them yourself once `db:verify` is happy (they were removed on this machine on 2026-11-07). Interrupted scrapes of the old layout resume where they stopped.
 
 ## How it works

@@ -7,7 +7,7 @@ import { RunsRepo } from './runs-repo.js';
 import { SitesRepo, type ListRef } from './sites-repo.js';
 
 /** Schema version of the whole results/db/ folder, kept in manifest.json. */
-export const DB_SCHEMA = 1;
+export const DB_SCHEMA = 2;
 
 export interface Manifest {
   schema: number;
@@ -123,9 +123,9 @@ export class Db {
     const current = this.generation(o.cat, o.list);
     const resumed = !!interrupted;
     const fresh = !resumed && o.outputExists && !o.keep && current > 0;
-    const g = resumed ? Math.max(interrupted!.g, current) : fresh ? current + 1 : Math.max(current, 1);
-    this.runs.append({ t: 'list.start', run: o.run, cat: o.cat, list: o.list, g, mode: o.mode, sites: o.sites, resumed, fresh });
-    return { cat: o.cat, list: o.list, g, run: o.run, resumed, fresh };
+    const generation = resumed ? Math.max(interrupted!.generation, current) : fresh ? current + 1 : Math.max(current, 1);
+    this.runs.append({ type: 'list.start', run: o.run, cat: o.cat, list: o.list, generation, mode: o.mode, sites: o.sites, resumed, fresh });
+    return { cat: o.cat, list: o.list, generation, run: o.run, resumed, fresh };
   }
 
   close(): void {

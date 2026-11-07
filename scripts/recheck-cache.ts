@@ -23,7 +23,7 @@ const SAMPLE = 25;
 // every list that has stored results (results/db/sites.jsonl); `id` is <group>/<base>
 const db = new Db(OUT_DIR, { readOnly: true });
 const files = db.sites.listSummaries()
-  .map((l) => ({ group: l.cat, base: l.list, g: l.g, id: `${l.cat}/${l.list}` }))
+  .map((l) => ({ group: l.cat, base: l.list, generation: l.generation, id: `${l.cat}/${l.list}` }))
   .sort((a, b) => a.id.localeCompare(b.id))
   .filter((c) => !only.length || only.includes(c.id) || only.includes(c.base));
 
@@ -53,8 +53,8 @@ const nameGained: string[] = [];
 const moved: string[] = [];
 const named: string[] = [];
 
-for (const { group, base, g, id } of files) {
-  const done = db.sites.loadList(group, base, g);
+for (const { group, base, generation, id } of files) {
+  const done = db.sites.loadList(group, base, generation);
   for (const r of done.values()) {
     const after = new Map(recheckSite(r).emails.map((e) => [e.email, e]));
     const used = new Set<string>();

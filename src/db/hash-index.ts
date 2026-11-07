@@ -2,7 +2,7 @@ import { hash as cryptoHash } from 'node:crypto';
 import fs from 'node:fs';
 
 /**
- * A persistent hash table over an append-only data file: id -> where its newest record sits. It is derived data
+ * A persistent hash table over a JSON-lines data file: id -> where its newest record sits. It is derived data
  * (rebuilt from the file if missing or damaged), kept on disk so a store opens without reading the data file and a
  * lookup costs a couple of positional reads whatever its size.
  *

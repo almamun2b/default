@@ -81,7 +81,7 @@ function setup() {
   const out = path.join(dir, 'results');
   const layout = fileLayout('dealers', 'list', out);
   const db = new Db(out);
-  const who = { cat: 'dealers', list: 'list', g: 1, run: 'test' };
+  const who = { cat: 'dealers', list: 'list', generation: 1, run: 'test' };
   db.sites.append(who, site('https://a.com.au/', ['sales@a.com.au', 'info@health.gov.au']));
   db.sites.append(who, site('https://b.com/', ['hi@b.com', 'x@b.de']));
   const opts = { ...DEFAULT_OPTIONS, concurrency: 1, hostConcurrency: 1, revalidateDays: 30 };
@@ -97,7 +97,7 @@ test('processFile --summary-only with a filter: full CSV, filtered CSV, and a hi
   assert.equal(path.dirname(filtered), path.join(layout.emailsDir, 'filtered'));
   assert.deepEqual(readCsv(filtered), ['sales@a.com.au', 'hi@b.com']);
   const events: Record<string, string>[] = [];
-  db.runs.scan((e) => { if (e.t === 'filter.end') events.push(e as Record<string, string>); });
+  db.runs.scan((e) => { if (e.type === 'filter.end') events.push(e as Record<string, string>); });
   assert.equal(events.length, 1);
   const log = events[0].text;
   assert.match(log, /filtered \(exclude \.de, \.gov\.au\)/);
@@ -122,10 +122,10 @@ test('filterFile writes only the filtered CSV from the stored results, leaving t
 test('filterFile skips a list with no stored results or an interrupted scrape', async () => {
   const { input, layout, opts, db, who } = setup();
   const filter = { include: ['au'], exclude: [] };
-  db.runs.append({ t: 'list.start', run: 'test', cat: 'dealers', list: 'list', g: 1 });
+  db.runs.append({ type: 'list.start', run: 'test', cat: 'dealers', list: 'list', generation: 1 });
   await filterFile(db, input, layout, { ...opts, filter });
   assert.ok(!fs.existsSync(filteredPath(layout, filter)), 'interrupted');
-  db.runs.append({ t: 'list.end', run: 'test', cat: 'dealers', list: 'list', g: 1 });
+  db.runs.append({ type: 'list.end', run: 'test', cat: 'dealers', list: 'list', generation: 1 });
   db.sites.drop(who, 'https://a.com.au/');
   db.sites.drop(who, 'https://b.com/');
   await filterFile(db, input, layout, { ...opts, filter });
@@ -147,7 +147,7 @@ test('writeUnique with a filter also writes unique/<label>.<tag>.csv', () => {
   assert.deepEqual(readCsv(target), ['sales@a.com.au', 'x@health.gov.au', 'help@b.de']);
   assert.deepEqual(readCsv(path.join(a.uniqueDir, 'dealers.exclude-suffix-de-gov.au.csv')), ['sales@a.com.au']);
   const texts: string[] = [];
-  db.runs.scan((e) => { if (e.t === 'unique.end') texts.push(String(e.text)); });
+  db.runs.scan((e) => { if (e.type === 'unique.end') texts.push(String(e.text)); });
   assert.match(texts[0], /unique dealers filtered \(exclude \.de, \.gov\.au\)/);
   db.close();
 });

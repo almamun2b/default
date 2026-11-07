@@ -16,7 +16,7 @@ const known = new Set(fs.readFileSync(path.join(ROOT, 'src', 'data', 'given-name
 const unknown = new Map<string, Set<string>>();
 const db = new Db(OUT_DIR, { readOnly: true });
 db.sites.scanRows((row) => {
-  for (const { email } of row.r?.emails ?? []) {
+  for (const { email } of row.result?.emails ?? []) {
     const parts = email.split('@')[0].split(/[._-]+/).filter(Boolean);
     if (parts.length !== 2 || !parts.every((p) => /^[a-z']{3,12}$/.test(p))) continue;
     if (known.has(parts[0])) continue;

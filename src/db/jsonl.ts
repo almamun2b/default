@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 
 /**
- * Low-level helpers for the append-only JSON-lines files in results/db/. A record is one line; a record cut off by
+ * Low-level helpers for the JSON-lines files in results/db/. A record is one line; a record cut off by
  * a crash is a line that fails to parse and is skipped, and the next writer starts on a fresh line
  * (ensureTrailingNewline), so a bad record never swallows a good one.
  */
@@ -90,11 +90,18 @@ export function readAt(fd: number, offset: number, length: number): Buffer | und
 /**
  * Parses the identifying head of a record. Every record is `{...identifiers, "<bodyKey>":{...body}}` with the
  * (possibly large) body last, so an index can be built without parsing it: the head is the text before the
- * body key, closed with `}`. Records without a body (tombstones, "gone" markers) are parsed whole.
+ * body key, closed with `}`. `bodyMarkers` are the body keys a record may use (`,"page":` and its older
+ * spelling `,"d":`); the earliest one found ends the head, as the head itself never contains one. Records without a
+ * body (tombstones, "gone" markers) are parsed whole.
  */
-export function parseHead(data: Buffer, start: number, end: number, bodyMarker: Buffer): Record<string, unknown> | null {
+export function parseHead(data: Buffer, start: number, end: number, bodyMarkers: Buffer[]): Record<string, unknown> | null {
   try {
-    const cut = data.subarray(start, end).indexOf(bodyMarker);
+    const line = data.subarray(start, end);
+    let cut = -1;
+    for (const m of bodyMarkers) {
+      const i = line.indexOf(m);
+      if (i >= 0 && (cut < 0 || i < cut)) cut = i;
+    }
     if (cut >= 0) return JSON.parse(data.toString('utf8', start, start + cut) + '}') as Record<string, unknown>;
     return JSON.parse(data.toString('utf8', start, end)) as Record<string, unknown>;
   } catch {

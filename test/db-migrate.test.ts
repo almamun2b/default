@@ -71,7 +71,7 @@ test('migrate: pages, site results, history, interrupted lists and CSVs come ove
   assert.ok(db.pages.getRecord('http', 'example.com/after'), 'a page after the damaged line is still imported');
   assert.ok(db.pages.getRecord('http', 'other.com/x'));
   const first = JSON.parse(fs.readFileSync(db.files.pages, 'utf8').split('\n')[0]);
-  assert.deepEqual([first.v, first.cat, first.run], [1, 'pizza-au', 'legacy']);
+  assert.deepEqual([first.version, first.cat, first.run], [2, 'pizza-au', 'legacy']);
 
   // site results: the rotated cache is generation 1, the live one generation 2 with its glued record recovered
   assert.deepEqual([...db.sites.loadList('pizza-au', 'shops.au', 1).keys()], ['https://old.com/']);
@@ -90,12 +90,12 @@ test('migrate: pages, site results, history, interrupted lists and CSVs come ove
   // history keeps the original text
   const ends: Record<string, any>[] = [];
   db.runs.scan((e) => ends.push(e));
-  const lists = ends.filter((e) => e.t === 'list.end');
+  const lists = ends.filter((e) => e.type === 'list.end');
   assert.equal(lists.length, 2);
   assert.deepEqual([lists[0].cat, lists[0].list, lists[0].counts.sites, lists[0].counts.withEmails, lists[0].legacy], ['pizza-au', 'shops.au', 3, 2, true]);
-  assert.equal(lists[0].a, Date.parse('2026-10-30T03:40:05Z'));
+  assert.equal(lists[0].at, Date.parse('2026-10-30T03:40:05Z'));
   assert.match(lists[0].text, /Emails {3}: 5 unique/);
-  assert.equal(ends.filter((e) => e.t === 'unique.end').length, 1);
+  assert.equal(ends.filter((e) => e.type === 'unique.end').length, 1);
 
   // outputs are copied to results/emails/<category>/
   assert.equal(fs.readFileSync(path.join(out, 'emails/pizza-au/shops.au.csv'), 'utf8'), 'name,email,website,link\nA,x@a.com,https://a.com/,l\n');

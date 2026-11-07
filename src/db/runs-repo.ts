@@ -1,18 +1,27 @@
 import fs from 'node:fs';
 import { ensureTrailingNewline, openAppend, scanLines, writeAll } from './jsonl.js';
 
-/** Record schema version written to run-history.jsonl. */
-export const RUN_EVENT_VERSION = 1;
+/** Record schema version written to run-history.jsonl. Version 1 used `v, t, a, g` for `version, type, at, generation`. */
+export const RUN_EVENT_VERSION = 2;
+
+/** An event under its current field names, whichever version wrote it. */
+export function runEventFields(raw: Record<string, unknown>): Record<string, unknown> {
+  if (raw.version !== undefined || raw.v === undefined) return raw;
+  const out: Record<string, unknown> = {};
+  const names: Record<string, string> = { v: 'version', t: 'type', a: 'at', g: 'generation' };
+  for (const [k, v] of Object.entries(raw)) out[names[k] ?? k] = v;
+  return out;
+}
 
 /**
- * Events, one per line of `results/db/run-history.jsonl` (append-only). Every event has `v`, `t` (the type), `a`
+ * Events, one per line of `results/db/run-history.jsonl` (the newest wins). Every event has `version`, `type`, `at`
  * (epoch ms), `ts` (the same as ISO text) and `run` (the run's id; `legacy` for history imported from the old
  * per-category logs):
  *
  * - `run.start`  `{pid, argv, options, node}`            - a scrape or output command started
  * - `run.end`    `{durationMs, failedFiles}`
- * - `list.start` `{cat, list, g, mode, sites, resumed, fresh}` - a list began (or resumed) being processed
- * - `list.end`   `{cat, list, g, status, counts, reasons, csv, text}` - it finished; `text` is the summary block
+ * - `list.start` `{cat, list, generation, mode, sites, resumed, fresh}` - a list began (or resumed) being processed
+ * - `list.end`   `{cat, list, generation, status, counts, reasons, csv, text}` - it finished; `text` is the summary block
  * - `filter.end` `{cat, list, text}`                     - a suffix-filtered CSV was written
  * - `unique.end` `{cat, label, text}`                    - a combined unique list was written
  *
@@ -20,15 +29,15 @@ export const RUN_EVENT_VERSION = 1;
  * error, never wrote it); the next plain run resumes it. This replaces the old `.inprogress` marker files.
  */
 export interface RunEvent {
-  t: string;
+  type: string;
   run: string;
   [field: string]: unknown;
 }
 
 export interface ListStart {
   run: string;
-  g: number;
-  a: number;
+  generation: number;
+  at: number;
   legacy?: boolean;
 }
 
@@ -50,16 +59,16 @@ export class RunsRepo {
   }
 
   private apply(ev: RunEvent): void {
-    if (ev.t !== 'list.start' && ev.t !== 'list.end') return;
+    if (ev.type !== 'list.start' && ev.type !== 'list.end') return;
     if (typeof ev.cat !== 'string' || typeof ev.list !== 'string') return;
     const key = listKey(ev.cat, ev.list);
     const s = this.lists.get(key) ?? { ended: true };
-    if (ev.t === 'list.start') {
-      s.start = { run: ev.run, g: Number(ev.g) || 1, a: Number(ev.a) || 0, ...(ev.legacy ? { legacy: true } : {}) };
+    if (ev.type === 'list.start') {
+      s.start = { run: ev.run, generation: Number(ev.generation) || 1, at: Number(ev.at) || 0, ...(ev.legacy ? { legacy: true } : {}) };
       s.ended = false;
     } else {
       s.ended = true;
-      s.lastEnd = Number(ev.a) || 0;
+      s.lastEnd = Number(ev.at) || 0;
     }
     this.lists.set(key, s);
   }
@@ -69,20 +78,20 @@ export class RunsRepo {
     if (!fs.existsSync(this.file) || fs.statSync(this.file).size <= this.scannedTo) return;
     this.scannedTo = scanLines(this.file, this.scannedTo, (data, s, e) => {
       try {
-        const ev = JSON.parse(data.toString('utf8', s, e)) as RunEvent;
-        if (ev && typeof ev.t === 'string') this.apply(ev);
+        const ev = runEventFields(JSON.parse(data.toString('utf8', s, e))) as unknown as RunEvent;
+        if (ev && typeof ev.type === 'string') this.apply(ev);
       } catch { /* an unfinished or damaged line */ }
     });
   }
 
   /** Writes one event. */
-  append(ev: RunEvent & { a?: number }): void {
+  append(ev: RunEvent & { at?: number }): void {
     if (this.fd === null) {
       ensureTrailingNewline(this.file);
       this.fd = openAppend(this.file);
     }
-    const a = ev.a ?? Date.now();
-    const full = { v: RUN_EVENT_VERSION, ...ev, a, ts: new Date(a).toISOString() };
+    const at = ev.at ?? Date.now();
+    const full = { version: RUN_EVENT_VERSION, ...ev, at, ts: new Date(at).toISOString() };
     writeAll(this.fd, Buffer.from(JSON.stringify(full) + '\n'));
     this.apply(full as RunEvent);
   }
@@ -97,7 +106,7 @@ export class RunsRepo {
   /** The generation of the list's latest start (0 if it never started). */
   startedGeneration(cat: string, list: string): number {
     this.refresh();
-    return this.lists.get(listKey(cat, list))?.start?.g ?? 0;
+    return this.lists.get(listKey(cat, list))?.start?.generation ?? 0;
   }
 
   /** Every list whose latest start is unfinished. */
@@ -113,7 +122,7 @@ export class RunsRepo {
   scan(cb: (ev: RunEvent) => void): void {
     scanLines(this.file, 0, (data, s, e) => {
       try {
-        cb(JSON.parse(data.toString('utf8', s, e)) as RunEvent);
+        cb(runEventFields(JSON.parse(data.toString('utf8', s, e))) as unknown as RunEvent);
       } catch { /* an unfinished or damaged line */ }
     });
   }

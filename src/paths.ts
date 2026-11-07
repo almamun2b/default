@@ -13,9 +13,9 @@ export const EMAILS_NAME = 'emails';
 
 export interface DbFiles {
   dir: string;
-  pages: string; // every page ever visited (append-only JSON lines)
+  pages: string; // every page ever visited (JSON lines; newest record wins)
   pagesIndex: string; // its persistent hash index (derived)
-  sites: string; // every list's per-site results (append-only JSON lines)
+  sites: string; // every list's per-site results (JSON lines)
   sitesIndex: string; // its index snapshot (derived)
   runs: string; // run and list history: starts, ends, summaries
   manifest: string; // schema version and the ledger of imports

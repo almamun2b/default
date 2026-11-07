@@ -109,8 +109,8 @@ function main(): void {
       }
     }
     try {
-      const g = db.sites.generation(group, base);
-      const done = db.sites.loadList(group, base, g);
+      const generation = db.sites.generation(group, base);
+      const done = db.sites.loadList(group, base, generation);
       const rows: SiteResult[] = [];
       for (const h of list) {
         const m = markRow(done.get(h.site), h);
@@ -119,7 +119,7 @@ function main(): void {
       }
       if (rows.length) toRetry.push(id);
       marked += rows.length;
-      if (write) for (const r of rows) db.sites.append({ cat: group, list: base, g, run: runId }, r);
+      if (write) for (const r of rows) db.sites.append({ cat: group, list: base, generation, run: runId }, r);
     } finally {
       release?.();
     }

@@ -111,7 +111,7 @@ function writeFiltered(db: Db, layout: FileLayout, rows: Row[], filter: SuffixFi
   const out = filteredPath(layout, filter);
   writeCsv(out, kept);
   const text = filterSummary(`${layout.id}.csv`, filter, rows.length, kept.length, dropped, path.relative(ROOT, out));
-  db.runs.append({ t: 'filter.end', run: runId, cat: layout.group, list: layout.base, csv: path.relative(ROOT, out), emails: rows.length, kept: kept.length, text });
+  db.runs.append({ type: 'filter.end', run: runId, cat: layout.group, list: layout.base, csv: path.relative(ROOT, out), emails: rows.length, kept: kept.length, text });
   log.info({ output: path.relative(ROOT, out), emails: rows.length, kept: kept.length }, '\n' + text);
 }
 
@@ -261,20 +261,20 @@ export async function processFile(db: Db, file: string, layout: FileLayout, opts
     const fresh = !summaryOnly && !retry && !newOnly && !interrupted && outputExists;
     const cutoff = fresh ? startedAt : startedAt - opts.revalidateDays * 86_400_000;
     const retried = retry ? [retry.failed && 'failed', retry.rateLimited && 'rate-limited', retry.budget && 'budget-queued', retry.capped && 'capped'].filter(Boolean) : [];
-    let who: ListRef = { cat, list, g: db.generation(cat, list), run: runId };
+    let who: ListRef = { cat, list, generation: db.generation(cat, list), run: runId };
     const crawlOpts: RunOptions = { ...opts };
     if (!summaryOnly) {
       const begun = db.beginList({ cat, list, run: runId, mode: retried.length ? `retry ${retried.join(' + ')}` : newOnly ? 'new-only' : 'scrape', sites: sites.length, outputExists, keep: !!retry || newOnly });
       who = begun;
-      if (begun.resumed) log.info({ generation: begun.g }, `${layout.id}: resuming an interrupted scrape from its stored results`);
-      if (begun.fresh) log.info({ generation: begun.g }, `${layout.id}: scraping again; the earlier results stay in the database as generation ${begun.g - 1}`);
+      if (begun.resumed) log.info({ generation: begun.generation }, `${layout.id}: resuming an interrupted scrape from its stored results`);
+      if (begun.fresh) log.info({ generation: begun.generation }, `${layout.id}: scraping again; the earlier results stay in the database as generation ${begun.generation - 1}`);
       // Every page fetched is kept, here and in later runs, whatever the category: a page is not requested twice.
       const store = db.pagesFor({ cat, list, run: runId });
       crawlOpts.pages = store;
       crawlOpts.pagesCutoff = cutoff;
       if (store.pages) log.info({ pages: store.pages }, `${layout.id}: ${store.pages} pages already scraped are reused unless older than ${fresh ? 'this run' : `${opts.revalidateDays} days`}`);
     }
-    const done = db.sites.loadList(cat, list, who.g);
+    const done = db.sites.loadList(cat, list, who.generation);
     // Re-crawled rows that had emails: kept as they were, plus any new emails the re-crawl finds (mergeResults).
     let previous = new Map<string, SiteResult>();
     const resumes = new Map<string, { prev: SiteResult; parts: ResumeParts }>();
@@ -334,7 +334,7 @@ export async function processFile(db: Db, file: string, layout: FileLayout, opts
     if (opts.filter) writeFiltered(db, layout, rows, opts.filter);
     // The end of the list. A scrape cut off before this line is resumed by the next run.
     db.runs.append({
-      t: 'list.end', run: runId, cat, list, g: who.g, status: 'finished', mode: summaryOnly ? 'summary' : retried.length ? 'retry' : newOnly ? 'new-only' : 'scrape',
+      type: 'list.end', run: runId, cat, list, generation: who.generation, status: 'finished', mode: summaryOnly ? 'summary' : retried.length ? 'retry' : newOnly ? 'new-only' : 'scrape',
       durationMs: Date.now() - startedAt, csv: rel(outFile), counts: summary.counts, reasons: summary.reasons, text: summary.text,
     });
   } finally {
@@ -383,7 +383,7 @@ export function writeUnique(db: Db, inputs: { id: string; file: string }[], labe
     ...(top.length ? [`  Overlap  : ${top.map(([k, n]) => `${k} ${n}`).join('; ')}`] : []),
     '',
   ].join('\n') + filtered;
-  db.runs.append({ t: 'unique.end', run: runId, cat, label, csv: path.relative(ROOT, outFile), files: files.length, rowsRead: read, uniqueEmails: rows.length, text });
+  db.runs.append({ type: 'unique.end', run: runId, cat, label, csv: path.relative(ROOT, outFile), files: files.length, rowsRead: read, uniqueEmails: rows.length, text });
   log.info({ output: path.relative(ROOT, outFile), files: files.length, rowsRead: read, uniqueEmails: rows.length }, '\n' + text);
 }
 

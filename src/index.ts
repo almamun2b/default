@@ -48,13 +48,13 @@ async function main() {
   const legacy = pendingSources(store);
   if (legacy.length && dryRun) log.info(`${legacy.length} files of the old per-category layout are not in the database yet; the first real run imports them (npm run db:migrate does it on its own)`);
   if (legacy.length && !dryRun) migrate(store);
-  const beginRun = (options: unknown) => { if (!dryRun) store.runs.append({ t: 'run.start', run: runId, pid: process.pid, argv: process.argv.slice(2), options, node: process.version }); };
+  const beginRun = (options: unknown) => { if (!dryRun) store.runs.append({ type: 'run.start', run: runId, pid: process.pid, argv: process.argv.slice(2), options, node: process.version }); };
   if (flags.has('unique')) {
     const other = ['force', 'new-only', ...RETRY_FLAGS, 'summary-only', 'quick', 'check-mx', 'revalidate', 'dry-run'].filter((f) => flags.has(f));
     if (other.length) throw new Error(`--unique only combines existing outputs; it can't be used with --${other.join(', --')}`);
     beginRun({ filter });
     runUnique(store, fileArgs, filter);
-    store.runs.append({ t: 'run.end', run: runId, durationMs: Date.now() - startedAt, failedFiles: 0 });
+    store.runs.append({ type: 'run.end', run: runId, durationMs: Date.now() - startedAt, failedFiles: 0 });
     await shutdown();
     return 0;
   }
@@ -143,7 +143,7 @@ async function main() {
     log.info('Dry run: nothing was scraped or written');
     return 0;
   }
-  store.runs.append({ t: 'run.end', run: runId, durationMs: Date.now() - startedAt, failedFiles });
+  store.runs.append({ type: 'run.end', run: runId, durationMs: Date.now() - startedAt, failedFiles });
   await shutdown();
   log.info({ durationMs: Date.now() - startedAt, failedFiles }, `Run ${runId} finished in ${fmtDuration(Date.now() - startedAt)}${failedFiles ? `; ${failedFiles} file(s) failed` : ''}`);
   return failedFiles ? 1 : 0;

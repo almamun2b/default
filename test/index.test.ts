@@ -334,7 +334,7 @@ test('writeUnique combines the output CSVs into emails/<category>/unique/, first
   ]);
   const events: Record<string, string>[] = [];
   db.runs.scan((e) => events.push(e as Record<string, string>));
-  const summary = events.find((e) => e.t === 'unique.end')!.text;
+  const summary = events.find((e) => e.type === 'unique.end')!.text;
   assert.doesNotMatch(summary, /Shared/);
   assert.match(summary, /Rows {5}: 4 read, 1 duplicate\(s\) removed/);
   db.close();
@@ -418,7 +418,7 @@ test('processFile --summary-only: credited rows, input names and failure details
     { email: `sales@${h}`, name: null, link: `https://${h}/contact` },
   ] });
   const db = new Db(out);
-  const who = { cat: 'dealers', list: 'list', g: 1, run: 'test' };
+  const who = { cat: 'dealers', list: 'list', generation: 1, run: 'test' };
   for (const r of [dealer('a.com.au'), dealer('b.com.au'), dealer('c.com.au'), site('https://dead.com.au/', { pages: 0, error: 'unreachable', errorDetail: 'dns' })]) db.sites.append(who, r);
   const opts = { ...DEFAULT_OPTIONS, concurrency: 1, hostConcurrency: 1, revalidateDays: 30 };
   await processFile(db, input, layout, opts, null, true);
@@ -428,7 +428,7 @@ test('processFile --summary-only: credited rows, input names and failure details
   ]);
   assert.deepEqual(fs.readdirSync(out).sort(), ['db', 'emails'], 'only the database and the output tree, no cache or log folders');
   const end = [] as Record<string, any>[];
-  db.runs.scan((e) => { if (e.t === 'list.end') end.push(e); });
+  db.runs.scan((e) => { if (e.type === 'list.end') end.push(e); });
   assert.equal(end.length, 1);
   assert.equal(end[0].list, 'list');
   assert.equal(end[0].counts.uniqueEmails, 4);
@@ -486,16 +486,16 @@ test('--dry-run describes each file without writing anything (F2)', () => {
   const out = path.join(dir, 'results');
   const layout = fileLayout('clinics', 'list', out);
   const writer = new Db(out);
-  const who = { cat: 'clinics', list: 'list', g: 1, run: 'test' };
+  const who = { cat: 'clinics', list: 'list', generation: 1, run: 'test' };
   const db = new Db(out, { readOnly: true });
   assert.equal(previewFile(db, input, layout, null, false), 'clinics/list: would scrape 3 sites');
   writer.sites.append(who, site('https://a.nz/', { emails: [{ email: 'x@a.nz', name: null, link: 'l' }] }));
   writer.sites.append(who, site('https://b.nz/', { error: 'unreachable' }));
-  writer.runs.append({ t: 'list.start', run: 'test', cat: 'clinics', list: 'list', g: 1 }); // a run that died before list.end
+  writer.runs.append({ type: 'list.start', run: 'test', cat: 'clinics', list: 'list', generation: 1 }); // a run that died before list.end
   assert.match(previewFile(db, input, layout, null, false), /resume an interrupted scrape: 2 of 3 sites stored, 1 to scrape/);
   assert.match(previewFile(db, input, layout, { failed: true, rateLimited: false, budget: false }, false), /re-crawl 1 and continue 0 of 3 sites, and scrape 1 not scraped yet/);
   assert.match(previewFile(db, input, layout, null, true), /interrupted; would be skipped/);
-  writer.runs.append({ t: 'list.end', run: 'test', cat: 'clinics', list: 'list', g: 1, status: 'finished' });
+  writer.runs.append({ type: 'list.end', run: 'test', cat: 'clinics', list: 'list', generation: 1, status: 'finished' });
   fs.mkdirSync(layout.emailsDir, { recursive: true });
   fs.writeFileSync(layout.outFile, 'name,email,website,link\n');
   assert.match(previewFile(db, input, layout, null, false), /would scrape all 3 sites again/);
@@ -504,7 +504,7 @@ test('--dry-run describes each file without writing anything (F2)', () => {
   assert.match(previewFile(db, input, layout, null, false, true), /nothing new \(all 3 sites stored\)/);
   assert.deepEqual(fs.readdirSync(path.join(out, 'db')).sort(), ['locks', 'manifest.json', 'run-history.jsonl', 'sites.jsonl'], 'the read-only database wrote nothing of its own');
 
-  writer.runs.append({ t: 'list.start', run: 'test', cat: 'clinics', list: 'gone', g: 1 });
+  writer.runs.append({ type: 'list.start', run: 'test', cat: 'clinics', list: 'gone', generation: 1 });
   fs.writeFileSync(path.join(writer.files.locksDir, 'clinics.list.lock'), '999999999');
   const stale = staleState(db, [input]);
   assert.equal(stale.length, 2);
@@ -518,7 +518,7 @@ test('--dry-run describes each file without writing anything (F2)', () => {
 
 const listOpts = { ...DEFAULT_OPTIONS, browserPages: 0, budgetMs: 30_000, concurrency: 1, hostConcurrency: 1, revalidateDays: 30 };
 const rowsOf = (file: string) => (parse(fs.readFileSync(file, 'utf8'), { columns: true }) as Record<string, string>[]).map((r) => r.email);
-const listEnds = (db: Db) => { const ends: Record<string, any>[] = []; db.runs.scan((e) => { if (e.t === 'list.end') ends.push(e); }); return ends; };
+const listEnds = (db: Db) => { const ends: Record<string, any>[] = []; db.runs.scan((e) => { if (e.type === 'list.end') ends.push(e); }); return ends; };
 
 test('every list shares the pages already scraped, in any category', async () => {
   const s = await startServer({
@@ -563,8 +563,8 @@ test('every list shares the pages already scraped, in any category', async () =>
     assert.deepEqual(rowsOf(other.outFile), ['info@acme.co.nz']);
     const stored = db.pages.getRecord('http', new URL(s.url).host + '/contact');
     assert.ok(stored);
-    const first = fs.readFileSync(db.files.pages, 'utf8').split('\n').map((l) => l && JSON.parse(l)).find((l) => l.k?.endsWith('/contact'));
-    assert.deepEqual([first.cat, first.list, first.site, first.m], ['clinics', 'one', s.url + '/a', 'http'], 'the page says who fetched it');
+    const first = fs.readFileSync(db.files.pages, 'utf8').split('\n').map((l) => l && JSON.parse(l)).find((l) => l.pageKey?.endsWith('/contact'));
+    assert.deepEqual([first.cat, first.list, first.site, first.mode], ['clinics', 'one', s.url + '/a', 'http'], 'the page says who fetched it');
   } finally {
     db.close();
     await s.close();
