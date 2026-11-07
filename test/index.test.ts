@@ -4,14 +4,17 @@ import fs from 'node:fs';
 import { parse } from 'csv-parse/sync';
 import os from 'node:os';
 import path from 'node:path';
-import { acquireLock, beginScrape, budgetRetry, cacheFiles, cappedRetry, endScrape, ensureTrailingNewline, failedRetry, loadCache, LockedError, planRetries, rateLimitedRetry, writeCacheAtomic, writeFileAtomic } from '../src/cache.js';
-import { BOOLEAN_FLAGS, DEFAULT_REVALIDATE_DAYS, INTEGER_FLAGS, NUMBER_FLAGS, OPTIONAL_NUMBER_FLAGS, parseArgs, rawFlag, retryOptions, STRING_FLAGS, USAGE } from '../src/cli.js';
+import { budgetRetry, cappedRetry, failedRetry, planRetries, rateLimitedRetry } from '../src/cache.js';
+import { ensureTrailingNewline } from '../src/db/jsonl.js';
+import { acquireLock, LockedError, writeFileAtomic } from '../src/db/lock.js';
+import { Db } from '../src/db/open.js';
+import { BOOLEAN_FLAGS, DEFAULT_REVALIDATE_DAYS, INTEGER_FLAGS, NUMBER_FLAGS, OPTIONAL_NUMBER_FLAGS, parseArgs, rawFlag, retryOptions, skipReason, STRING_FLAGS, USAGE } from '../src/cli.js';
 import { setMxResolver, undeliverable } from '../src/mx.js';
 import type { SiteResult } from '../src/crawler.js';
 import { readSites } from '../src/input.js';
 import { assignRows, recheckSite, safeCell, uniqueLabel, uniqueRows } from '../src/output.js';
 import { categoryOf, fileLayout, findInputs, findOutputs, groupOf } from '../src/paths.js';
-import { closePages, previewFile, processFile, staleState, writeUnique } from '../src/run.js';
+import { previewFile, processFile, staleState, writeUnique } from '../src/run.js';
 import { DEFAULT_OPTIONS } from '../src/crawler.js';
 import { page, startServer } from './helpers/server.js';
 
@@ -21,6 +24,18 @@ const site = (s: string, extra: Partial<SiteResult> = {}): SiteResult => ({
 });
 
 // ---------- CLI (L1) ----------
+
+test('skipReason: named files get the same treatment as a plain run', () => {
+  const base = { force: false, newOnly: false, retry: false, summaryOnly: false, hasOutput: false, interrupted: false };
+  assert.equal(skipReason({ ...base, hasOutput: true }), 'finished'); // finished list: its cache is never rotated away
+  assert.equal(skipReason({ ...base, hasOutput: true, force: true }), null);
+  assert.equal(skipReason({ ...base, hasOutput: true, newOnly: true }), null);
+  assert.equal(skipReason({ ...base, hasOutput: true, summaryOnly: true }), null);
+  assert.equal(skipReason({ ...base, hasOutput: true, retry: true }), null);
+  assert.equal(skipReason({ ...base, hasOutput: true, interrupted: true }), null); // resumes
+  assert.equal(skipReason(base), null); // never scraped: scrape it
+  assert.equal(skipReason({ ...base, retry: true }), 'no-output-to-retry');
+});
 
 test('parseArgs accepts valid flags in both forms', () => {
   const a = parseArgs(['--force', '--max-pages=10', '--budget', '2.5', '--log-level=debug', 'x.csv']);
@@ -46,26 +61,23 @@ test('parseArgs rejects values on boolean flags, fractions on counts, unknown fl
   assert.throws(() => parseArgs(['--frobnicate']), /Unknown option/);
 });
 
-test('--retry-budget-queued takes minutes as --x=N, --x N, or none; a file after it stays a file', () => {
+test('--retry-budget-queued is a plain flag; the retired =MIN / space forms fail loudly, pointing at --budget', () => {
   const alone = parseArgs(['--retry-budget-queued', 'websites/a.csv']);
   assert.ok(alone.flags.has('retry-budget-queued'));
-  assert.equal(alone.values.get('retry-budget-queued'), undefined);
   assert.deepEqual(alone.files, ['websites/a.csv']);
-  assert.equal(parseArgs(['--retry-budget-queued=60']).values.get('retry-budget-queued'), 60);
+  assert.throws(() => parseArgs(['--retry-budget-queued=60']), /set the per-site time budget with --budget=MIN/);
+  assert.throws(() => parseArgs(['--retry-budget-queued=abc']), /set the per-site time budget with --budget=MIN/);
   const spaced = parseArgs(['--retry-budget-queued', '7.5', 'a.csv']);
-  assert.equal(spaced.values.get('retry-budget-queued'), 7.5);
-  assert.deepEqual(spaced.files, ['a.csv']);
-  assert.throws(() => parseArgs(['--retry-budget-queued=0']), /minutes > 0/);
-  assert.throws(() => parseArgs(['--retry-budget-queued=abc']), /minutes > 0/);
+  assert.deepEqual(spaced.files, ['7.5', 'a.csv']); // no value is consumed, so the number is a file path and fails later
   assert.ok(parseArgs(['--retry-rate-limited']).flags.has('retry-rate-limited'));
   assert.throws(() => parseArgs(['--retry-rate-limited=1']), /takes no value/);
 });
 
-test('retryOptions: the three retries are independent, and the budget is given once', () => {
-  assert.deepEqual(retryOptions(parseArgs(['--retry-failed', '--retry-rate-limited'])), { failed: true, rateLimited: true, budget: false, capped: false, budgetMin: undefined });
-  assert.deepEqual(retryOptions(parseArgs(['--retry-budget-queued=45'])), { failed: false, rateLimited: false, budget: true, capped: false, budgetMin: 45 });
-  assert.equal(retryOptions(parseArgs(['--retry-budget-queued', '--budget=30'])).budgetMin, undefined);
-  assert.throws(() => retryOptions(parseArgs(['--retry-budget-queued=60', '--budget=30'])), /give it once/);
+test('retryOptions: the four retries are independent; the budget is only ever --budget', () => {
+  assert.deepEqual(retryOptions(parseArgs(['--retry-failed', '--retry-rate-limited'])), { failed: true, rateLimited: true, budget: false, capped: false });
+  assert.deepEqual(retryOptions(parseArgs(['--retry-budget-queued'])), { failed: false, rateLimited: false, budget: true, capped: false });
+  assert.deepEqual(retryOptions(parseArgs(['--retry-budget-queued', '--budget=30'])), { failed: false, rateLimited: false, budget: true, capped: false });
+  assert.deepEqual(retryOptions(parseArgs(['--retry-capped', '--max-pages=800'])), { failed: false, rateLimited: false, budget: false, capped: true });
 });
 
 test('--revalidate takes days as --x=N, --x N, or none; a file after it stays a file', () => {
@@ -132,87 +144,21 @@ test('readSites: counts invalid and duplicate rows; query strings stay distinct 
   assert.equal(r.invalid, 1);
 });
 
-// ---------- cache (H3, M10, M11) ----------
-
-test('beginScrape rotates a finished run\'s cache instead of deleting it (H3)', () => {
-  const files = cacheFiles(tmp(), 'x');
-  fs.writeFileSync(files.cache, JSON.stringify(site('https://a.nz/')) + '\n');
-  const r = beginScrape(files, true);
-  assert.equal(r.resumed, false);
-  assert.ok(r.rotatedTo && fs.existsSync(r.rotatedTo));
-  assert.ok(!fs.existsSync(files.cache));
-  assert.ok(fs.existsSync(files.marker));
-});
-
-test('--retry-failed reuses a finished run\'s cache instead of rotating it', () => {
-  const dir = tmp();
-  const files = cacheFiles(dir, 'x');
-  const line = JSON.stringify(site('https://a.nz/')) + '\n';
-  fs.writeFileSync(files.cache, line);
-  const r = beginScrape(files, true, true);
-  assert.deepEqual(r, { resumed: false, rotatedTo: undefined });
-  assert.equal(fs.readFileSync(files.cache, 'utf8'), line);
-  assert.deepEqual(fs.readdirSync(dir).sort(), ['x.inprogress', 'x.jsonl']);
-});
-
-test('--new-only reuses a finished run\'s cache, so only sites missing from it are scraped', () => {
-  const dir = tmp();
-  const files = cacheFiles(dir, 'x');
-  const line = JSON.stringify(site('https://a.nz/')) + '\n';
-  fs.writeFileSync(files.cache, line);
-  const r = beginScrape(files, true, true);
-  assert.equal(r.rotatedTo, undefined);
-  assert.equal(fs.readFileSync(files.cache, 'utf8'), line);
-  assert.deepEqual([...loadCache(files.cache).keys()], ['https://a.nz/']);
-});
-
-test('an interrupted re-scrape resumes instead of resetting again (H3)', () => {
-  const files = cacheFiles(tmp(), 'x');
-  fs.writeFileSync(files.cache, 'old\n');
-  beginScrape(files, true); // run 1 starts, rotates the old cache
-  fs.writeFileSync(files.cache, JSON.stringify(site('https://a.nz/')) + '\n'); // run 1 finishes one site, then dies
-  const r = beginScrape(files, true); // run 2: output still exists, but the marker says "interrupted"
-  assert.equal(r.resumed, true);
-  assert.equal(loadCache(files.cache).size, 1);
-  endScrape(files);
-  assert.ok(!fs.existsSync(files.marker));
-});
-
-test('without an output, an existing cache is resumed (legacy interrupted run)', () => {
-  const files = cacheFiles(tmp(), 'x');
-  fs.writeFileSync(files.cache, JSON.stringify(site('https://a.nz/')) + '\n');
-  assert.equal(beginScrape(files, false).rotatedTo, undefined);
-  assert.equal(loadCache(files.cache).size, 1);
-});
-
-test('loadCache skips corrupt lines', () => {
-  const files = cacheFiles(tmp(), 'x');
-  fs.writeFileSync(files.cache, JSON.stringify(site('https://a.nz/')) + '\n{"site":"htt\n');
-  assert.equal(loadCache(files.cache).size, 1);
-});
-
-test('loadCache recovers records glued onto one line by an interrupted run', () => {
-  const files = cacheFiles(tmp(), 'x');
-  const a = JSON.stringify(site('https://a.nz/', { business: 'Shop } {"x"' }));
-  const b = JSON.stringify(site('https://b.nz/'));
-  const c = JSON.stringify(site('https://c.nz/'));
-  fs.writeFileSync(files.cache, `${a}${b}\n${c}\0\0\0${a.replace('a.nz', 'd.nz')}\n{"site":"htt${b.replace('b.nz', 'e.nz')}\n`);
-  assert.deepEqual([...loadCache(files.cache).keys()].sort(), ['https://a.nz/', 'https://b.nz/', 'https://c.nz/', 'https://d.nz/', 'https://e.nz/']);
-});
+// ---------- stored results (H3, M10, M11) ----------
 
 test('ensureTrailingNewline keeps the next append on its own line', () => {
-  const files = cacheFiles(tmp(), 'x');
-  ensureTrailingNewline(files.cache); // missing file: no-op
-  assert.ok(!fs.existsSync(files.cache));
-  fs.writeFileSync(files.cache, '');
-  ensureTrailingNewline(files.cache);
-  assert.equal(fs.readFileSync(files.cache, 'utf8'), '');
+  const file = path.join(tmp(), 'x.jsonl');
+  ensureTrailingNewline(file); // missing file: no-op
+  assert.ok(!fs.existsSync(file));
+  fs.writeFileSync(file, '');
+  ensureTrailingNewline(file);
+  assert.equal(fs.readFileSync(file, 'utf8'), '');
   const a = JSON.stringify(site('https://a.nz/'));
-  fs.writeFileSync(files.cache, a); // cut off before its newline
-  ensureTrailingNewline(files.cache);
-  ensureTrailingNewline(files.cache); // already ends in \n: no-op
-  fs.appendFileSync(files.cache, JSON.stringify(site('https://b.nz/')) + '\n');
-  const lines = fs.readFileSync(files.cache, 'utf8').split('\n').filter(Boolean);
+  fs.writeFileSync(file, a); // cut off before its newline
+  ensureTrailingNewline(file);
+  ensureTrailingNewline(file); // already ends in \n: no-op
+  fs.appendFileSync(file, JSON.stringify(site('https://b.nz/')) + '\n');
+  const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean);
   assert.equal(lines.length, 2);
   for (const l of lines) JSON.parse(l);
 });
@@ -259,22 +205,15 @@ test('planRetries: saved state is continued, rows without it are crawled again k
   assert.equal(planRetries(new Map([['x', site('x', { v: 3, emails, resume: { ...st, queued: [] } })]]), { failed: false, rateLimited: false, budget: true }).resume.size, 0);
 });
 
-test('writeCacheAtomic leaves no temp file', () => {
-  const dir = tmp();
-  const files = cacheFiles(dir, 'x');
-  writeCacheAtomic(files.cache, [site('https://a.nz/')]);
-  assert.deepEqual(fs.readdirSync(dir), ['x.jsonl']);
-});
-
 test('acquireLock refuses a live holder and takes over a stale one (M11)', () => {
-  const files = cacheFiles(tmp(), 'x');
-  fs.writeFileSync(files.lock, String(process.ppid)); // a live process that isn't us
-  assert.throws(() => acquireLock(files.lock), LockedError);
-  fs.writeFileSync(files.lock, '999999999'); // no such pid
-  const release = acquireLock(files.lock);
-  assert.equal(fs.readFileSync(files.lock, 'utf8'), String(process.pid));
+  const lock = path.join(tmp(), 'x.lock');
+  fs.writeFileSync(lock, String(process.ppid)); // a live process that isn't us
+  assert.throws(() => acquireLock(lock), LockedError);
+  fs.writeFileSync(lock, '999999999'); // no such pid
+  const release = acquireLock(lock);
+  assert.equal(fs.readFileSync(lock, 'utf8'), String(process.pid));
   release();
-  assert.ok(!fs.existsSync(files.lock));
+  assert.ok(!fs.existsSync(lock));
 });
 
 // ---------- output (M7) ----------
@@ -376,7 +315,7 @@ test('uniqueRows keeps each email once across files, first file wins, case-insen
   assert.deepEqual(Object.fromEntries(overlaps), { 'au.b ← au.a': 1, 'au.c ← au.a': 1, 'au.c ← au.b': 1 });
 });
 
-test('writeUnique combines the output CSVs into emails/unique/, first file wins', () => {
+test('writeUnique combines the output CSVs into emails/<category>/unique/, first file wins, and records it in the run history', () => {
   const out = path.join(tmp(), 'results');
   const a = fileLayout('dealers', 'a', out);
   const b = fileLayout('dealers', 'b', out);
@@ -384,17 +323,21 @@ test('writeUnique combines the output CSVs into emails/unique/, first file wins'
   put(a.outFile, 'name,email,website,link\nA,sales@a.com.au,https://a.com.au/,l\nY,info@b.com.au,https://a.com.au/,l\n');
   put(b.outFile, 'name,email,website,link\nB,info@b.com.au,https://b.com.au/,l\nC,help@b.com.au,https://b.com.au/,l\n');
   const target = path.join(a.uniqueDir, 'dealers.csv');
-  assert.equal(path.dirname(target), path.join(out, 'dealers', 'emails', 'unique'));
-  writeUnique([{ id: 'a', file: a.outFile }, { id: 'b', file: b.outFile }], 'dealers', target, a.logDir);
+  assert.equal(path.dirname(target), path.join(out, 'emails', 'dealers', 'unique'));
+  const db = new Db(out);
+  writeUnique(db, [{ id: 'a', file: a.outFile }, { id: 'b', file: b.outFile }], 'dealers', target, 'dealers');
   const rows = parse(fs.readFileSync(target, 'utf8'), { columns: true }) as Record<string, string>[];
   assert.deepEqual(rows.map((r) => [r.name, r.email, r.website]), [
     ['A', 'sales@a.com.au', 'https://a.com.au/'],
     ['Y', 'info@b.com.au', 'https://a.com.au/'],
     ['C', 'help@b.com.au', 'https://b.com.au/'],
   ]);
-  const summary = fs.readFileSync(path.join(a.logDir, 'unique.dealers.log'), 'utf8');
+  const events: Record<string, string>[] = [];
+  db.runs.scan((e) => events.push(e as Record<string, string>));
+  const summary = events.find((e) => e.type === 'unique.end')!.text;
   assert.doesNotMatch(summary, /Shared/);
   assert.match(summary, /Rows {5}: 4 read, 1 duplicate\(s\) removed/);
+  db.close();
 });
 
 test('uniqueLabel names the combined file after the shared prefix', () => {
@@ -413,22 +356,19 @@ test('groupOf: category folder, else the file name; outputs map back to the same
   assert.equal(groupOf(path.join(IN, 'dealers', 'au.ford.csv'), IN, OUT), 'dealers');
   assert.equal(groupOf(path.join(IN, 'clinics.csv'), IN, OUT), 'clinics');
   assert.equal(groupOf(path.join(path.sep, 'elsewhere', 'sample.csv'), IN, OUT), 'sample');
-  assert.equal(groupOf(path.join(OUT, 'dealers', 'emails', 'au.ford.csv'), IN, OUT), 'dealers');
+  assert.equal(groupOf(path.join(OUT, 'emails', 'dealers', 'au.ford.csv'), IN, OUT), 'dealers');
   assert.equal(groupOf(path.join(IN, 'a', 'b', 'x.csv'), IN, OUT), 'x'); // only one level of category
   assert.equal(categoryOf(path.join(IN, 'clinics.csv'), IN, OUT), undefined);
 });
 
-test('fileLayout puts output, cache, logs and unique (inside emails/) in the group folder', () => {
+test('fileLayout puts output, filtered and unique CSVs in results/emails/<category>/, and nothing else', () => {
   const l = fileLayout('dealers', 'au.ford', OUT);
   assert.equal(l.id, 'dealers/au.ford');
-  assert.equal(l.outFile, path.join(OUT, 'dealers', 'emails', 'au.ford.csv'));
-  assert.equal(l.cacheDir, path.join(OUT, 'dealers', '.cache'));
-  assert.equal(l.logDir, path.join(OUT, 'dealers', 'logs'));
-  assert.equal(l.uniqueDir, path.join(OUT, 'dealers', 'emails', 'unique'));
-  assert.ok(!('sharedFile' in l));
-  assert.equal(l.pagesFile, path.join(OUT, 'dealers', '.cache', '.pages'), 'one page store per category');
-  assert.equal(fileLayout('dealers', 'au.toyota', OUT).pagesFile, l.pagesFile);
-  assert.equal(l.pagesLock, path.join(OUT, 'dealers', '.cache', '.pages.lock'));
+  assert.equal(l.outFile, path.join(OUT, 'emails', 'dealers', 'au.ford.csv'));
+  assert.equal(l.filteredDir, path.join(OUT, 'emails', 'dealers', 'filtered'));
+  assert.equal(l.uniqueDir, path.join(OUT, 'emails', 'dealers', 'unique'));
+  assert.deepEqual(Object.keys(l).sort(), ['base', 'emailsDir', 'filteredDir', 'group', 'id', 'outFile', 'uniqueDir'], 'no cache or log folders any more');
+  for (const reserved of ['db', 'emails', 'unique']) assert.throws(() => fileLayout(reserved, 'x', OUT), /reserved/);
 });
 
 test('findInputs and findOutputs walk one level of category folders', () => {
@@ -436,7 +376,7 @@ test('findInputs and findOutputs walk one level of category folders', () => {
   const put = (...p: string[]) => { fs.mkdirSync(path.dirname(path.join(d, ...p)), { recursive: true }); fs.writeFileSync(path.join(d, ...p), 'x'); };
   put('top.csv'); put('dealers', 'a.csv'); put('dealers', 'notes.txt'); put('dealers', 'deep', 'z.csv'); put('.hidden', 'h.csv');
   assert.deepEqual(findInputs(d).map((f) => path.relative(d, f)), [path.join('dealers', 'a.csv'), 'top.csv']);
-  put('dealers', 'emails', 'a.csv'); put('dealers', 'emails', 'unique', 'dealers.csv'); put('dealers', 'top-level-ignored.csv'); put('unique', 'u.csv'); put('logs', 'l.csv'); put('.cache', 'c.csv');
+  put('emails', 'dealers', 'a.csv'); put('emails', 'dealers', 'unique', 'dealers.csv'); put('emails', 'dealers', 'filtered', 'a.com.csv'); put('emails', 'unique', 'u.csv'); put('emails', '.hidden', 'h.csv'); put('dealers', 'top-level-ignored.csv'); put('db', 'pages.csv');
   assert.deepEqual([...findOutputs(d)].map(([g, f]) => [g, f.map((x) => path.basename(x))]), [['dealers', ['a.csv']]]);
 });
 
@@ -467,32 +407,36 @@ test('writeFileAtomic creates files readable by their owner only, and keeps an e
   assert.equal(fs.readFileSync(f, 'utf8'), 'b');
 });
 
-test('processFile --summary-only: credited rows, no shared file, input names and failure details', async () => {
+test('processFile --summary-only: credited rows, input names and failure details', async () => {
   const dir = tmp();
   const input = path.join(dir, 'list.csv');
   fs.writeFileSync(input, 'name,website\nAlpha Motors,a.com.au\nBeta Motors,b.com.au\nGamma Motors,c.com.au\nDead Motors,dead.com.au\n');
-  const layout = fileLayout('dealers', 'list', path.join(dir, 'results'));
-  fs.mkdirSync(layout.cacheDir, { recursive: true });
+  const out = path.join(dir, 'results');
+  const layout = fileLayout('dealers', 'list', out);
   const dealer = (h: string): SiteResult => site(`https://${h}/`, { business: 'Home', emails: [
     { email: 'complaints@myfordfinance.com.au', name: null, link: `https://${h}/privacy` },
     { email: `sales@${h}`, name: null, link: `https://${h}/contact` },
   ] });
-  writeCacheAtomic(cacheFiles(layout.cacheDir, 'list').cache, [
-    dealer('a.com.au'), dealer('b.com.au'), dealer('c.com.au'),
-    site('https://dead.com.au/', { pages: 0, error: 'unreachable', errorDetail: 'dns' }),
-  ]);
+  const db = new Db(out);
+  const who = { cat: 'dealers', list: 'list', generation: 1, run: 'test' };
+  for (const r of [dealer('a.com.au'), dealer('b.com.au'), dealer('c.com.au'), site('https://dead.com.au/', { pages: 0, error: 'unreachable', errorDetail: 'dns' })]) db.sites.append(who, r);
   const opts = { ...DEFAULT_OPTIONS, concurrency: 1, hostConcurrency: 1, revalidateDays: 30 };
-  await processFile(input, layout, opts, null, true);
+  await processFile(db, input, layout, opts, null, true);
   const rows = parse(fs.readFileSync(layout.outFile, 'utf8'), { columns: true }) as Record<string, string>[];
   assert.deepEqual(rows.map((r) => [r.name, r.email]), [
     ['Alpha Motors', 'complaints@myfordfinance.com.au'], ['Alpha Motors', 'sales@a.com.au'], ['Beta Motors', 'sales@b.com.au'], ['Gamma Motors', 'sales@c.com.au'],
   ]);
-  assert.ok(!fs.existsSync(path.join(layout.groupDir, 'shared')));
-  const summary = fs.readFileSync(path.join(layout.logDir, 'list.log'), 'utf8');
-  assert.match(summary, /4 unique \(0 person name, 0 department page title, 4 input name, 0 business name\)/);
-  assert.doesNotMatch(summary, /Shared/);
-  assert.match(summary, /Failures : unreachable=1 \(dns=1\)/);
-  assert.match(summary, /dead\.com\.au \[unreachable: dns\]/);
+  assert.deepEqual(fs.readdirSync(out).sort(), ['db', 'emails'], 'only the database and the output tree, no cache or log folders');
+  const end = [] as Record<string, any>[];
+  db.runs.scan((e) => { if (e.type === 'list.end') end.push(e); });
+  assert.equal(end.length, 1);
+  assert.equal(end[0].list, 'list');
+  assert.equal(end[0].counts.uniqueEmails, 4);
+  assert.match(end[0].text, /4 unique \(0 person name, 0 department page title, 4 input name, 0 business name\)/);
+  assert.doesNotMatch(end[0].text, /Shared/);
+  assert.match(end[0].text, /Failures : unreachable=1 \(dns=1\)/);
+  assert.match(end[0].text, /dead\.com\.au \[unreachable: dns\]/);
+  db.close();
 });
 
 test('--retry-capped needs a higher --max-pages, and picks only rows stopped by the page cap (F4)', () => {
@@ -539,76 +483,90 @@ test('--dry-run describes each file without writing anything (F2)', () => {
   const input = path.join(dir, 'websites', 'clinics', 'list.csv');
   fs.mkdirSync(path.dirname(input), { recursive: true });
   fs.writeFileSync(input, 'website\na.nz\nb.nz\nc.nz\n');
-  const layout = fileLayout('clinics', 'list', path.join(dir, 'results'));
-  assert.equal(previewFile(input, layout, null, false), 'clinics/list: would scrape 3 sites');
-  fs.mkdirSync(layout.cacheDir, { recursive: true });
-  const cf = cacheFiles(layout.cacheDir, 'list');
-  writeCacheAtomic(cf.cache, [site('https://a.nz/', { emails: [{ email: 'x@a.nz', name: null, link: 'l' }] }), site('https://b.nz/', { error: 'unreachable' })]);
-  fs.writeFileSync(cf.marker, '1');
-  assert.match(previewFile(input, layout, null, false), /resume an interrupted scrape: 2 of 3 sites cached, 1 to scrape/);
-  assert.match(previewFile(input, layout, { failed: true, rateLimited: false, budget: false }, false), /re-crawl 1 and continue 0 of 3 sites, and scrape 1 not scraped yet/);
-  assert.match(previewFile(input, layout, null, true), /interrupted; would be skipped/);
-  fs.rmSync(cf.marker);
+  const out = path.join(dir, 'results');
+  const layout = fileLayout('clinics', 'list', out);
+  const writer = new Db(out);
+  const who = { cat: 'clinics', list: 'list', generation: 1, run: 'test' };
+  const db = new Db(out, { readOnly: true });
+  assert.equal(previewFile(db, input, layout, null, false), 'clinics/list: would scrape 3 sites');
+  writer.sites.append(who, site('https://a.nz/', { emails: [{ email: 'x@a.nz', name: null, link: 'l' }] }));
+  writer.sites.append(who, site('https://b.nz/', { error: 'unreachable' }));
+  writer.runs.append({ type: 'list.start', run: 'test', cat: 'clinics', list: 'list', generation: 1 }); // a run that died before list.end
+  assert.match(previewFile(db, input, layout, null, false), /resume an interrupted scrape: 2 of 3 sites stored, 1 to scrape/);
+  assert.match(previewFile(db, input, layout, { failed: true, rateLimited: false, budget: false }, false), /re-crawl 1 and continue 0 of 3 sites, and scrape 1 not scraped yet/);
+  assert.match(previewFile(db, input, layout, null, true), /interrupted; would be skipped/);
+  writer.runs.append({ type: 'list.end', run: 'test', cat: 'clinics', list: 'list', generation: 1, status: 'finished' });
   fs.mkdirSync(layout.emailsDir, { recursive: true });
   fs.writeFileSync(layout.outFile, 'name,email,website,link\n');
-  assert.match(previewFile(input, layout, null, false), /would scrape all 3 sites again/);
-  assert.match(previewFile(input, layout, null, false, true), /would scrape 1 new sites; 2 cached sites reused/);
-  assert.equal(fs.readdirSync(layout.cacheDir).sort().join(), 'list.jsonl', 'nothing written, no lock taken');
-  writeCacheAtomic(cf.cache, [site('https://a.nz/'), site('https://b.nz/'), site('https://c.nz/')]);
-  assert.match(previewFile(input, layout, null, false, true), /nothing new \(all 3 sites cached\)/);
+  assert.match(previewFile(db, input, layout, null, false), /would scrape all 3 sites again/);
+  assert.match(previewFile(db, input, layout, null, false, true), /would scrape 1 new sites; 2 stored sites reused/);
+  writer.sites.append(who, site('https://c.nz/'));
+  assert.match(previewFile(db, input, layout, null, false, true), /nothing new \(all 3 sites stored\)/);
+  assert.deepEqual(fs.readdirSync(path.join(out, 'db')).sort(), ['locks', 'manifest.json', 'run-history.jsonl', 'sites.jsonl'], 'the read-only database wrote nothing of its own');
 
-  fs.writeFileSync(path.join(layout.cacheDir, 'gone.inprogress'), '1');
-  fs.writeFileSync(path.join(layout.cacheDir, 'list.lock'), '999999999');
-  const stale = staleState([input], path.join(dir, 'results'));
+  writer.runs.append({ type: 'list.start', run: 'test', cat: 'clinics', list: 'gone', generation: 1 });
+  fs.writeFileSync(path.join(writer.files.locksDir, 'clinics.list.lock'), '999999999');
+  const stale = staleState(db, [input]);
   assert.equal(stale.length, 2);
-  assert.match(stale.join('\n'), /gone\.inprogress: an interrupted scrape whose input list is gone/);
-  assert.match(stale.join('\n'), /list\.lock: left by a run that is gone/);
+  assert.match(stale.join('\n'), /clinics\/gone: an interrupted scrape .* whose input list is gone/);
+  assert.match(stale.join('\n'), /clinics\.list\.lock: left by a run that is gone/);
+  db.close();
+  writer.close();
 });
 
-// ---------- pages are scraped once per category ----------
+// ---------- pages are scraped once, whatever the category ----------
 
 const listOpts = { ...DEFAULT_OPTIONS, browserPages: 0, budgetMs: 30_000, concurrency: 1, hostConcurrency: 1, revalidateDays: 30 };
 const rowsOf = (file: string) => (parse(fs.readFileSync(file, 'utf8'), { columns: true }) as Record<string, string>[]).map((r) => r.email);
+const listEnds = (db: Db) => { const ends: Record<string, any>[] = []; db.runs.scan((e) => { if (e.type === 'list.end') ends.push(e); }); return ends; };
 
-test('the lists of one category share the pages already scraped; another category starts empty', async () => {
+test('every list shares the pages already scraped, in any category', async () => {
   const s = await startServer({
     '/a': page('<a href="/contact">Contact</a>'),
     '/b': page('<a href="/contact">Contact</a>'),
     '/c': page('<a href="/contact?utm_source=x">Contact</a>'),
     '/contact': page('<a href="mailto:info@acme.co.nz">mail</a>'),
   });
+  const dir = tmp();
+  const out = path.join(dir, 'results');
+  let db = new Db(out);
   try {
-    const dir = tmp();
     const write = (name: string, sites: string[]) => {
       const f = path.join(dir, `${name}.csv`);
       fs.writeFileSync(f, `website\n${sites.map((x) => s.url + x).join('\n')}\n`);
       return f;
     };
-    const out = path.join(dir, 'results');
     const one = fileLayout('clinics', 'one', out), two = fileLayout('clinics', 'two', out), other = fileLayout('shops', 'one', out);
 
-    await processFile(write('one', ['/a']), one, listOpts, null);
+    await processFile(db, write('one', ['/a']), one, listOpts, null);
     assert.equal(s.hits.filter((h) => h === '/contact').length, 1);
-    assert.ok(fs.existsSync(one.pagesFile));
-    assert.equal(fs.statSync(one.pagesFile).mode & 0o777, 0o600, 'it holds personal data');
+    assert.equal(fs.statSync(db.files.pages).mode & 0o777, 0o600, 'it holds personal data');
+    assert.equal(fs.statSync(db.files.sites).mode & 0o777, 0o600);
 
     // a second list of the category, with a tracking param on the link: nothing is requested for the page again
-    await processFile(write('two', ['/b', '/c']), two, listOpts, null);
+    await processFile(db, write('two', ['/b', '/c']), two, listOpts, null);
     assert.equal(s.hits.filter((h) => h.startsWith('/contact')).length, 1);
     assert.deepEqual(rowsOf(two.outFile), ['info@acme.co.nz']);
-    assert.match(fs.readFileSync(path.join(two.logDir, 'two.log'), 'utf8'), /Crawl {4}: 2 pages fetched \+ 2 reused/);
-    closePages();
+    assert.match(listEnds(db).find((e) => e.list === 'two')!.text, /Crawl {4}: 2 pages fetched \+ 2 reused/);
+    db.close();
 
-    // the next run of the category still knows them (a list that grew)
-    await processFile(write('two', ['/b', '/c', '/a']), two, listOpts, null, false, true);
+    // the next run still knows them (a list that grew)
+    db = new Db(out);
+    await processFile(db, write('two', ['/b', '/c', '/a']), two, listOpts, null, false, true);
     assert.equal(s.hits.filter((h) => h.startsWith('/contact')).length, 1);
-    closePages();
+    db.close();
 
-    await processFile(write('one', ['/a']), other, listOpts, null);
-    assert.equal(s.hits.filter((h) => h === '/contact').length, 2, 'another category has its own pages');
-    assert.notEqual(other.pagesFile, one.pagesFile);
+    // another category reuses them too: the page is in the one store
+    db = new Db(out);
+    await processFile(db, write('one', ['/a']), other, listOpts, null);
+    assert.equal(s.hits.filter((h) => h === '/contact').length, 1, 'a page is fetched once, whatever the category');
+    assert.deepEqual(rowsOf(other.outFile), ['info@acme.co.nz']);
+    const stored = db.pages.getRecord('http', new URL(s.url).host + '/contact');
+    assert.ok(stored);
+    const first = fs.readFileSync(db.files.pages, 'utf8').split('\n').map((l) => l && JSON.parse(l)).find((l) => l.pageKey?.endsWith('/contact'));
+    assert.deepEqual([first.cat, first.list, first.site, first.mode], ['clinics', 'one', s.url + '/a', 'http'], 'the page says who fetched it');
   } finally {
-    closePages();
+    db.close();
     await s.close();
   }
 });
@@ -619,45 +577,108 @@ test('a fresh re-scrape and --revalidate ask for stored pages again, with their 
     '/a': link, '/a2': link, '/a3': link,
     '/contact': { body: page('<a href="mailto:info@acme.co.nz">mail</a>'), headers: { etag: '"v1"' } },
   });
+  const dir = tmp();
+  const out = path.join(dir, 'results');
+  let db = new Db(out);
+  const reopen = () => { db.close(); db = new Db(out); };
   try {
-    const dir = tmp();
     const input = path.join(dir, 'list.csv');
     const sites = (n: number) => fs.writeFileSync(input, `website\n${['/a', '/a2', '/a3'].slice(0, n).map((x) => s.url + x).join('\n')}\n`);
-    const layout = fileLayout('clinics', 'list', path.join(dir, 'results'));
+    const layout = fileLayout('clinics', 'list', out);
     const asks = () => s.hits.map((h, i) => [h, s.heads[i]['if-none-match']]).filter(([h]) => h === '/contact');
 
     sites(1);
-    await processFile(input, layout, listOpts, null);
-    closePages();
+    await processFile(db, input, layout, listOpts, null);
+    reopen();
     sites(2);
-    await processFile(input, layout, listOpts, null, false, true); // the list grew; the stored page is still fresh
-    closePages();
+    await processFile(db, input, layout, listOpts, null, false, true); // the list grew; the stored page is still fresh
+    reopen();
     assert.equal(asks().length, 1);
 
     sites(3);
-    await processFile(input, layout, { ...listOpts, revalidateDays: 0 }, null, false, true);
-    closePages();
+    await processFile(db, input, layout, { ...listOpts, revalidateDays: 0 }, null, false, true);
+    reopen();
     assert.deepEqual(asks(), [['/contact', undefined], ['/contact', '"v1"']], '--revalidate: asked again, conditionally');
 
-    const sizeBefore = fs.statSync(layout.pagesFile).size;
-    await processFile(input, layout, listOpts, null); // output exists, so this is a fresh re-scrape of all three sites
-    closePages();
+    const sizeBefore = fs.statSync(db.files.pages).size;
+    await processFile(db, input, layout, listOpts, null); // output exists, so this is a fresh re-scrape of all three sites
+    reopen();
     assert.equal(asks().length, 3, 'a fresh re-scrape asks again, once, and the other sites use that answer');
-    assert.ok(fs.statSync(layout.pagesFile).size > sizeBefore, 'older lines are kept, never rewritten');
+    assert.ok(fs.statSync(db.files.pages).size > sizeBefore, 'older lines are kept, never rewritten');
     assert.deepEqual(rowsOf(layout.outFile), ['info@acme.co.nz']);
+    assert.equal(db.sites.generation('clinics', 'list'), 2, 'the fresh re-scrape is a new generation; the first stays in the file');
+    assert.equal(db.sites.loadList('clinics', 'list', 1).size, 3);
   } finally {
-    closePages();
+    db.close();
     await s.close();
   }
 });
 
-test('a category in use by another live run is not scraped (its page store has one writer)', async () => {
+test('a run that dies mid-list is resumed by the next one, which scrapes only the sites left', async () => {
+  const s = await startServer({ '/a': page('<p>a@acme.co.nz</p>'), '/b': page('<p>b@acme.co.nz</p>'), '/c': page('<p>c@acme.co.nz</p>') });
+  const dir = tmp();
+  const out = path.join(dir, 'results');
+  const input = path.join(dir, 'list.csv');
+  fs.writeFileSync(input, `website\n${['/a', '/b', '/c'].map((x) => s.url + x).join('\n')}\n`);
+  const layout = fileLayout('clinics', 'list', out);
+  try {
+    // the first run stored one site, then died: no list.end, no CSV
+    let db = new Db(out);
+    const begun = db.beginList({ cat: 'clinics', list: 'list', run: 'dead', mode: 'scrape', sites: 3, outputExists: false, keep: false });
+    db.sites.append(begun, site(s.url + '/a', { emails: [{ email: 'a@acme.co.nz', name: null, link: s.url + '/a' }] }));
+    db.close();
+
+    db = new Db(out);
+    assert.ok(db.runs.interrupted('clinics', 'list'));
+    assert.match(previewFile(db, input, layout, null, false), /resume an interrupted scrape: 1 of 3 sites stored, 2 to scrape/);
+    await processFile(db, input, layout, listOpts, null);
+    assert.ok(!db.runs.interrupted('clinics', 'list'), 'now it has ended');
+    assert.equal(s.hits.filter((h) => h === '/a').length, 0, 'the stored site was not crawled again');
+    assert.deepEqual(rowsOf(layout.outFile).sort(), ['a@acme.co.nz', 'b@acme.co.nz', 'c@acme.co.nz']);
+    assert.equal(db.sites.generation('clinics', 'list'), 1);
+    assert.equal(listEnds(db).length, 1);
+    db.close();
+  } finally {
+    await s.close();
+  }
+});
+
+test('a retry drops failed sites it will crawl again, so an interrupted retry still redoes them', async () => {
+  const s = await startServer({ '/ok': page('<p>ok@acme.co.nz</p>') });
+  const dir = tmp();
+  const out = path.join(dir, 'results');
+  const input = path.join(dir, 'list.csv');
+  fs.writeFileSync(input, `website\n${s.url}/ok\n${s.url}/missing\n`);
+  const layout = fileLayout('clinics', 'list', out);
+  const db = new Db(out);
+  try {
+    await processFile(db, input, layout, listOpts, null);
+    const g = db.sites.generation('clinics', 'list');
+    assert.equal(db.sites.loadList('clinics', 'list', g).size, 2);
+    const failed = [...db.sites.loadList('clinics', 'list', g).values()].filter((r) => r.error);
+    assert.equal(failed.length, 1, 'the missing page is a failed site');
+    await processFile(db, input, layout, listOpts, { failed: true, rateLimited: false, budget: false }, false, false);
+    assert.equal(db.sites.generation('clinics', 'list'), g, 'a retry builds on the current generation');
+    const end = listEnds(db);
+    assert.equal(end.length, 2);
+    assert.match(end[1].mode, /retry/);
+  } finally {
+    db.close();
+    await s.close();
+  }
+});
+
+test('the page store has one writer: a database whose pages are held by another live run is not scraped', async () => {
   const dir = tmp();
   const input = path.join(dir, 'list.csv');
   fs.writeFileSync(input, 'website\nhttps://example.com/\n');
-  const layout = fileLayout('clinics', 'list', path.join(dir, 'results'));
-  fs.mkdirSync(layout.cacheDir, { recursive: true });
-  fs.writeFileSync(layout.pagesLock, String(process.ppid)); // a live process that is not this one
-  await assert.rejects(processFile(input, layout, listOpts, null), LockedError);
-  closePages();
+  const out = path.join(dir, 'results');
+  const layout = fileLayout('clinics', 'list', out);
+  const db = new Db(out);
+  fs.writeFileSync(path.join(db.files.locksDir, 'pages.lock'), String(process.ppid)); // a live process that is not this one
+  try {
+    await assert.rejects(processFile(db, input, layout, listOpts, null), LockedError);
+  } finally {
+    db.close();
+  }
 });

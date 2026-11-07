@@ -11,7 +11,7 @@ import { makeBrowserFetcher } from '../src/browser.js';
 import { failedRetry } from '../src/cache.js';
 import { closeBrowser, mergeResults, resumeSite, scrapeSite, type SiteResult } from '../src/crawler.js';
 import { hostGapMs, httpGet, resetHostPacing, setCrawlDelay } from '../src/http.js';
-import { PageStore } from '../src/pages.js';
+import { PagesRepo } from '../src/db/pages-repo.js';
 
 after(() => closeBrowser());
 
@@ -583,9 +583,11 @@ test('frames, iframes and meta refresh lead to pages (F5)', async () => {
   }
 });
 
-// ---------- a page is scraped once per category ----------
+// ---------- a page is scraped once, whatever the category ----------
 
-const newStore = () => new PageStore(path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pages-')), '.pages'));
+const WHO = { cat: 'test', list: 'list', run: 'r1' };
+const storeFiles = (dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pages-'))) => ({ data: path.join(dir, 'pages.jsonl'), index: path.join(dir, 'pages.idx') });
+const newStore = () => { const repo = new PagesRepo(storeFiles()); return Object.assign(repo.view(WHO), { close: () => repo.close() }); };
 const pageHits = (hits: string[]) => hits.filter((h) => h !== '/robots.txt' && !h.startsWith('/sitemap'));
 
 test('a page another site already scraped is not requested again, and its emails and links still count', async () => {
@@ -678,19 +680,19 @@ test('a page that answered 404 is not asked for again by other sites; one that f
   }
 });
 
-test('a later run of the category reuses the pages an earlier run saved on disk', async () => {
+test('a later run, even of another category, reuses the pages an earlier run saved on disk', async () => {
   const s = await startServer({
     '/a': page('<a href="/contact">Contact</a>'),
     '/b': page('<a href="/contact">Contact</a>'),
     '/contact': page('<p>info@acme.co.nz</p>'),
   });
-  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pages-')), '.pages');
+  const files = storeFiles();
   try {
-    const first = new PageStore(file);
-    await scrapeSite(s.url + '/a', { ...NO_BROWSER, pages: first });
+    const first = new PagesRepo(files);
+    await scrapeSite(s.url + '/a', { ...NO_BROWSER, pages: first.view(WHO) });
     first.close();
-    const second = new PageStore(file);
-    const b = await scrapeSite(s.url + '/b', { ...NO_BROWSER, pages: second });
+    const second = new PagesRepo(files);
+    const b = await scrapeSite(s.url + '/b', { ...NO_BROWSER, pages: second.view({ ...WHO, cat: 'other-category' }) });
     second.close();
     assert.deepEqual(emailsOf(b), ['info@acme.co.nz']);
     assert.equal(s.hits.filter((h) => h === '/contact').length, 1);

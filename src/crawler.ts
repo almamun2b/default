@@ -5,7 +5,7 @@ import { businessName, demoteRolePrefixes, extractFromDom, isGenericTitle, looks
 import { httpGet, type FailKind } from './http.js';
 import { log } from './logger.js';
 import { allowed, blockReason, loadRobots, robotsAllow, sitemapsOf, type RobotsBlock, type RobotsRules } from './robots.js';
-import type { Mode, PageRecord, PageStore } from './pages.js';
+import { NOT_MODIFIED, type Mode, type PageRecord, type PagesView } from './db/pages-repo.js';
 import { loadSitemapUrls } from './sitemap.js';
 import { baseHost, canonical, crawlable, inSection, pageKey, priority, sameSite, sectionPrefix } from './urls.js';
 
@@ -78,7 +78,7 @@ export interface CrawlOptions {
   maxDepth: number;
   budgetMs: number; // soft budget; partial results are kept when it runs out
   pageConcurrency: number; // parallel page requests within one site (HTTP phase)
-  pages?: PageStore; // every page this category has fetched: a page already in it is reused instead of requested again
+  pages?: PagesView; // every page ever fetched (any category): a page already in it is reused instead of requested again
   pagesCutoff?: number; // a stored page older than this (epoch ms) is revalidated; unset = every stored page counts
 }
 
@@ -259,7 +259,7 @@ interface RunLimits {
   deadline?: number;
   concurrency?: number;
   signal?: AbortSignal;
-  pages?: { store: PageStore; mode: Mode; cutoff: number }; // the category's fetched pages for this phase: reused, revalidated, added to
+  pages?: { store: PagesView; mode: Mode; cutoff: number }; // the fetched pages for this phase: reused, revalidated, added to
 }
 
 const pagesOf = (opt: CrawlOptions, mode: Mode): RunLimits['pages'] => opt.pages && { store: opt.pages, mode, cutoff: opt.pagesCutoff ?? 0 };
@@ -289,11 +289,11 @@ async function runQueue(c: SiteCrawl, fetcher: Fetcher, maxPages: number, opts: 
           log.debug({ url: item.url }, "skipping a page that its host's robots.txt disallows");
           continue;
         }
-        // Another site of the category may already have this page, or be fetching it right now (see PageStore.load).
+        // Another site of the category may already have this page, or be fetching it right now (see PagesRepo.loadRecord).
         // A reused page still counts toward --max-pages, so a site is crawled exactly as it would be without the store.
         let skipped = false;
         const key = pageKey(new URL(item.url));
-        const fetchRecord = async (stale?: PageRecord): Promise<PageRecord | null> => {
+        const fetchRecord = async (stale?: PageRecord): Promise<PageRecord | typeof NOT_MODIFIED | null> => {
           const validators: Validators | undefined = stale && (stale.etag || stale.lastModified) ? { etag: stale.etag, lastModified: stale.lastModified } : undefined;
           const r = await fetcher(item.url, validators);
           if (!r) return null;
@@ -301,7 +301,7 @@ async function runQueue(c: SiteCrawl, fetcher: Fetcher, maxPages: number, opts: 
             opts.pages?.store.markGone(opts.pages.mode, key);
             return null;
           }
-          if (r.notModified && stale) return { ...stale, at: Date.now() }; // revalidated: the stored copy is current
+          if (r.notModified && stale) return NOT_MODIFIED; // revalidated: the stored copy is current, the store only renews its time
           if (r.url !== item.url) {
             // a redirect: don't fetch the target again, and don't take emails from another site or a disallowed page
             c.seen.add(canonical(new URL(r.url)));
@@ -315,7 +315,7 @@ async function runQueue(c: SiteCrawl, fetcher: Fetcher, maxPages: number, opts: 
         };
         const got = opts.pages
           ? await opts.pages.store.load(opts.pages.mode, key, opts.pages.cutoff, fetchRecord)
-          : await fetchRecord().then((rec) => (rec ? { rec, reused: false } : null));
+          : await fetchRecord().then((rec) => (rec && rec !== NOT_MODIFIED ? { rec, reused: false } : null));
         if (got === 'gone') {
           log.debug({ url: item.url }, 'skipping a page that is gone (404/410)');
           continue;
@@ -477,7 +477,7 @@ async function browserPhase(starts: string[], opt: CrawlOptions, deadline: numbe
     let out: CrawlOut | null = null;
     for (const start of starts) {
       if (signal?.aborted) break;
-      out = await crawl(start, fetcher, opt.browserPages, { concurrency: 2, deadline, maxDepth: opt.maxDepth, signal, pages: pagesOf(opt, 'b') });
+      out = await crawl(start, fetcher, opt.browserPages, { concurrency: 2, deadline, maxDepth: opt.maxDepth, signal, pages: pagesOf(opt, 'browser') });
       if (out.blocked || out.home) break;
     }
     return out;
@@ -498,7 +498,7 @@ export type OnPartial = (r: SiteResult) => void;
  * When time runs out or the server rate-limits pages, `resume` records what is left for resumeSite().
  */
 export async function scrapeSite(site: string, options: Partial<CrawlOptions> = {}, signal?: AbortSignal, onPartial?: OnPartial): Promise<SiteResult> {
-  const opt = { ...DEFAULT_OPTIONS, ...options };
+  const opt = { ...DEFAULT_OPTIONS, ...options, pages: options.pages?.withSite(site) };
   const deadline = Date.now() + opt.budgetMs;
   const result: SiteResult = {
     v: CACHE_VERSION,
@@ -525,7 +525,7 @@ export async function scrapeSite(site: string, options: Partial<CrawlOptions> = 
   for (const start of candidateStarts(site)) {
     if (signal?.aborted) break;
     lastFail = '';
-    const out = await crawl(start, fetchHttp, opt.maxPages, { useSitemap: true, deadline, maxDepth: opt.maxDepth, concurrency: opt.pageConcurrency, signal, pages: pagesOf(opt, 'h') });
+    const out = await crawl(start, fetchHttp, opt.maxPages, { useSitemap: true, deadline, maxDepth: opt.maxDepth, concurrency: opt.pageConcurrency, signal, pages: pagesOf(opt, 'http') });
     if (!out.home && !out.blocked) fails.push(lastFail || 'network');
     if (out.blocked) {
       result.error = out.blocked;
@@ -621,7 +621,7 @@ export interface ResumeParts {
  * robots.txt now disallows the landing page.
  */
 export async function resumeSite(prev: SiteResult, parts: ResumeParts, options: Partial<CrawlOptions> = {}, signal?: AbortSignal, onPartial?: OnPartial): Promise<SiteResult> {
-  const opt = { ...DEFAULT_OPTIONS, ...options };
+  const opt = { ...DEFAULT_OPTIONS, ...options, pages: options.pages?.withSite(prev.site) };
   const deadline = Date.now() + opt.budgetMs;
   const saved = prev.resume;
   if (!saved) return prev;
@@ -660,7 +660,7 @@ export async function resumeSite(prev: SiteResult, parts: ResumeParts, options: 
   let stop: Stop = 'done';
   if (c.queue.size) {
     const fetchHttp = httpFetcher(signal, (url) => { rateLimited++; limited.add(url); });
-    stop = await runQueue(c, fetchHttp, opt.maxPages, { deadline, concurrency: opt.pageConcurrency, signal, pages: pagesOf(opt, 'h') });
+    stop = await runQueue(c, fetchHttp, opt.maxPages, { deadline, concurrency: opt.pageConcurrency, signal, pages: pagesOf(opt, 'http') });
   }
   const outOfTime = stop === 'time';
   const left = leftover(c, stop, limited, { queued: takeQueued ? [] : saved.queued, limited: takeLimited ? [] : saved.limited, capped: saved.capped });

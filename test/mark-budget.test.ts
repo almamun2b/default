@@ -34,5 +34,5 @@ test('markRow marks only a row that still matches the log line', () => {
   assert.match((markRow(row({ pages: 120 }), hit) as { skip: string }).skip, /scraped again since/);
   assert.match((markRow(row({ v: 3 }), hit) as { skip: string }).skip, /scraped again since/);
   assert.match((markRow(row({ budgetQueued: 5 }), hit) as { skip: string }).skip, /already marked/);
-  assert.match((markRow(undefined, hit) as { skip: string }).skip, /not in the cache/);
+  assert.match((markRow(undefined, hit) as { skip: string }).skip, /not stored/);
 });

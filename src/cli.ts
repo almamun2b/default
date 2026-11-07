@@ -1,9 +1,9 @@
 import { parseSuffixes, type SuffixFilter } from './filter.js';
 
-export const BOOLEAN_FLAGS = ['force', 'retry-failed', 'retry-rate-limited', 'retry-capped', 'summary-only', 'new-only', 'quick', 'unique', 'dry-run', 'check-mx', 'help'];
+export const BOOLEAN_FLAGS = ['force', 'retry-failed', 'retry-rate-limited', 'retry-budget-queued', 'retry-capped', 'summary-only', 'new-only', 'quick', 'unique', 'dry-run', 'check-mx', 'help'];
 export const INTEGER_FLAGS = ['max-pages', 'browser-pages', 'max-depth', 'concurrency', 'page-concurrency', 'host-concurrency'];
 export const NUMBER_FLAGS = ['budget']; // minutes, may be fractional
-export const OPTIONAL_NUMBER_FLAGS = ['retry-budget-queued', 'revalidate']; // a flag that may carry a number (minutes, days): --x, --x=60 or --x 60
+export const OPTIONAL_NUMBER_FLAGS = ['revalidate']; // a flag that may carry a number (days): --x, --x=60 or --x 60
 /** Stored pages older than this many days are requested again (--revalidate=DAYS). */
 export const DEFAULT_REVALIDATE_DAYS = 30;
 export const RETRY_FLAGS = ['retry-failed', 'retry-rate-limited', 'retry-budget-queued', 'retry-capped'];
@@ -13,7 +13,7 @@ export const LIST_FLAGS = ['include-suffix', 'exclude-suffix']; // comma-separat
 export const USAGE = `Usage: npm run scrape -- [options] [websites/<category>/<list>.csv ...]
 
 With no files, scrapes every list under websites/ that has no output yet (and resumes interrupted ones).
-Named files are always scraped again, unless --new-only is given.
+Named files get the same treatment: lists with an output are skipped, interrupted ones resume. Add --force to scrape them again.
 
 Crawl limits (defaults: deep crawl)
   --quick                    lighter crawl: 150 pages, 30 browser pages, 10 min per site
@@ -25,27 +25,27 @@ Crawl limits (defaults: deep crawl)
   --page-concurrency=N       page requests in parallel within one site (3)
   --host-concurrency=N       requests in parallel to one server, across all sites (3)
 
-Pages already scraped (kept per category in results/<category>/.cache/.pages; a page is never requested twice)
+Pages already scraped (kept in results/db/pages.jsonl for every category; a page is never requested twice)
   --revalidate[=DAYS]        ask again for stored pages older than DAYS days (30); with no number, for every stored page once
 
-Re-running and retrying (they reuse the cache and can be combined)
+Re-running and retrying (they reuse the stored results and can be combined)
   --force                    scrape every list again, even those with an output
-  --new-only                 keep the cache and scrape only the sites not cached yet (for a list that grew)
+  --new-only                 keep the stored results and scrape only the sites not stored yet (for a list that grew)
   --retry-failed             crawl again the sites that failed with no emails
   --retry-rate-limited       fetch the pages servers refused with HTTP 429/503
-  --retry-budget-queued[=MIN]  continue sites that ran out of time, from their saved queue
+  --retry-budget-queued      continue sites that ran out of time, from their saved queue (per-site budget: --budget=MIN)
   --retry-capped             continue sites that reached --max-pages (give a higher --max-pages)
 
 Outputs without crawling
-  --summary-only             rebuild CSVs and summaries from the cache with the current rules
-  --unique                   each email once per category -> results/<category>/emails/unique/<category>.csv
+  --summary-only             rebuild CSVs and summaries from the stored results with the current rules
+  --unique                   each email once per category -> results/emails/<category>/unique/<category>.csv
   --check-mx                 drop emails whose domain can't receive mail (DNS lookups only)
 
-Filtering outputs (by the ending of the email's domain; scraping, the cache and the normal CSV keep every email)
+Filtering outputs (by the ending of the email's domain; scraping, the stored results and the normal CSV keep every email)
   --include-suffix=.com,.au  also write a CSV with only the emails whose domain ends with one of these
   --exclude-suffix=.gov,.edu also write a CSV without the emails whose domain ends with one of these
                              (both together: included and not excluded; quote the [..] form: '--exclude-suffix[.gov,.de]')
-                             lists with an output already are not scraped again, only filtered from their cache
+                             lists with an output already are not scraped again, only filtered from their stored results
 
 Other
   --dry-run                  show what the command would do; writes nothing under results/
@@ -77,7 +77,11 @@ export function parseArgs(argv: string[]): ParsedArgs {
     const name = bracket ? bracket[1] : eq < 0 ? a.slice(2) : a.slice(2, eq);
     const inline = bracket ? bracket[2] : eq < 0 ? undefined : a.slice(eq + 1);
     if (BOOLEAN_FLAGS.includes(name)) {
-      if (inline !== undefined) throw new Error(`--${name} takes no value (got "--${name}=${inline}")`);
+      if (inline !== undefined) {
+        // retired value form (--retry-budget-queued=MIN); point at the one way left to set the budget
+        if (name === 'retry-budget-queued') throw new Error('--retry-budget-queued takes no value; set the per-site time budget with --budget=MIN');
+        throw new Error(`--${name} takes no value (got "--${name}=${inline}")`);
+      }
       flags.add(name);
     } else if (OPTIONAL_NUMBER_FLAGS.includes(name)) {
       flags.add(name);
@@ -119,19 +123,14 @@ export interface RetryOptions {
   rateLimited: boolean; // pages the server refused with 429/503: fetched again
   budget: boolean; // the queue left when the time budget ran out: continued
   capped: boolean; // the queue left at the page cap: continued up to a higher --max-pages
-  budgetMin?: number; // per-site budget for this run, from --retry-budget-queued=MIN
 }
 
-/** The retry flags of one run. `--retry-budget-queued=MIN` sets the budget, so it can't be combined with --budget. */
+/** The retry flags of one run; independent, so they combine. The per-site time budget comes only from --budget. */
 export function retryOptions({ flags, values }: ParsedArgs): RetryOptions {
-  const budgetMin = values.get('retry-budget-queued');
-  if (budgetMin !== undefined && values.has('budget')) {
-    throw new Error('--retry-budget-queued=MIN and --budget=MIN both set the time budget; give it once');
-  }
   if (flags.has('retry-capped') && !values.has('max-pages')) {
     throw new Error('--retry-capped continues sites that stopped at their page cap, so it needs a higher cap: add --max-pages=N (0 for no cap at all)');
   }
-  return { failed: flags.has('retry-failed'), rateLimited: flags.has('retry-rate-limited'), budget: flags.has('retry-budget-queued'), capped: flags.has('retry-capped'), budgetMin };
+  return { failed: flags.has('retry-failed'), rateLimited: flags.has('retry-rate-limited'), budget: flags.has('retry-budget-queued'), capped: flags.has('retry-capped') };
 }
 
 /** The --include-suffix / --exclude-suffix filter of this run, or null when neither is given. */
@@ -142,6 +141,26 @@ export function suffixFilter({ lists }: ParsedArgs): SuffixFilter | null {
 }
 
 /** The raw value of one string flag, read before full validation (so logging can start first). */
+export interface ListState {
+  force: boolean;
+  newOnly: boolean;
+  retry: boolean;
+  summaryOnly: boolean;
+  hasOutput: boolean;
+  interrupted: boolean;
+}
+
+/**
+ * Whether a list is left alone this run. The same for named files and for a plain run, so a command that names
+ * lists resumes interrupted ones and never discards a finished cache unless --force is given.
+ */
+export function skipReason({ force, newOnly, retry, summaryOnly, hasOutput, interrupted }: ListState): 'finished' | 'no-output-to-retry' | null {
+  if (!force && !newOnly && !retry && !summaryOnly && hasOutput && !interrupted) return 'finished';
+  // A retry only redoes parts of finished scrapes; a list never scraped needs a normal run first.
+  if (retry && !hasOutput) return 'no-output-to-retry';
+  return null;
+}
+
 export function rawFlag(argv: string[], name: string): string | undefined {
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === `--${name}`) return argv[i + 1];

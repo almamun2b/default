@@ -3,26 +3,52 @@ import path from 'node:path';
 
 export const ROOT = path.resolve(import.meta.dirname, '..');
 export const IN_DIR = path.join(ROOT, 'websites');
-export const OUT_DIR = path.join(ROOT, 'results');
+/** results/ by default; SCRAPER_RESULTS_DIR points a run at another folder (a scratch copy for a test run, say). */
+export const OUT_DIR = process.env.SCRAPER_RESULTS_DIR ? path.resolve(process.env.SCRAPER_RESULTS_DIR) : path.join(ROOT, 'results');
 
-/** Everything one input file writes. `id` (`dealers/au.ford`) names it in messages and logs. */
-export interface FileLayout {
-  id: string;
-  group: string;
-  base: string;
-  groupDir: string;
-  emailsDir: string;
-  outFile: string;
-  cacheDir: string;
-  logDir: string;
-  filteredDir: string; // the --include-suffix / --exclude-suffix CSVs of this category's lists
-  uniqueDir: string;
-  pagesFile: string; // every page the category has fetched, shared by all its lists (PageStore)
-  pagesLock: string; // PID of the run using pagesFile
+/** Where the database lives: results/db/ (see src/db/). */
+export const DB_NAME = 'db';
+/** Where every output CSV lives: results/emails/<category>/. */
+export const EMAILS_NAME = 'emails';
+
+export interface DbFiles {
+  dir: string;
+  pages: string; // every page ever visited (JSON lines; newest record wins)
+  pagesIndex: string; // its persistent hash index (derived)
+  sites: string; // every list's per-site results (JSON lines)
+  sitesIndex: string; // its index snapshot (derived)
+  runs: string; // run and list history: starts, ends, summaries
+  manifest: string; // schema version and the ledger of imports
+  locksDir: string;
 }
 
-/** Folder inside a group that holds its output CSVs (results/<group>/emails/*.csv) and the unique/ lists. */
-const EMAILS_SUBDIR = 'emails';
+export function dbFiles(outDir = OUT_DIR): DbFiles {
+  const dir = path.join(outDir, DB_NAME);
+  return {
+    dir,
+    pages: path.join(dir, 'pages.jsonl'),
+    pagesIndex: path.join(dir, 'pages.idx'),
+    sites: path.join(dir, 'sites.jsonl'),
+    sitesIndex: path.join(dir, 'sites.idx'),
+    runs: path.join(dir, 'run-history.jsonl'),
+    manifest: path.join(dir, 'manifest.json'),
+    locksDir: path.join(dir, 'locks'),
+  };
+}
+
+/** Folders directly under results/ that are not categories: the database, the output tree, the cross-category unique lists' folder name. */
+const RESERVED = new Set([DB_NAME, EMAILS_NAME, 'unique']);
+
+/** Everything one input file writes. `id` (`dealers/au.ford`) names it in messages. */
+export interface FileLayout {
+  id: string;
+  group: string; // the category (or, for an uncategorized list, its own name)
+  base: string;
+  emailsDir: string; // results/emails/<group>
+  outFile: string;
+  filteredDir: string; // the --include-suffix / --exclude-suffix CSVs of this category's lists
+  uniqueDir: string;
+}
 
 const baseName = (f: string) => path.basename(f, path.extname(f));
 
@@ -33,37 +59,32 @@ function folderIn(dir: string, file: string): string | undefined {
   return rel;
 }
 
-/** The category of an input or output CSV: its folder under websites/ (websites/<category>/x.csv) or results/ (results/<category>/emails/x.csv), else undefined. */
+/** The category of an input or output CSV: its folder under websites/ (websites/<category>/x.csv) or results/emails/ (results/emails/<category>/x.csv), else undefined. */
 export function categoryOf(file: string, inDir = IN_DIR, outDir = OUT_DIR): string | undefined {
-  const rel = path.relative(outDir, path.dirname(path.resolve(file))).split(path.sep);
-  const fromOutput = rel.length === 2 && rel[1] === EMAILS_SUBDIR && rel[0] && rel[0] !== '..' && rel[0] !== '.' ? rel[0] : undefined;
-  return folderIn(inDir, file) ?? fromOutput;
+  return folderIn(inDir, file) ?? folderIn(path.join(outDir, EMAILS_NAME), file);
 }
 
-/** The results/<group>/ folder for a CSV: its category, else its own base name, so an uncategorized list gets a folder to itself. */
+/** The results/emails/<group>/ folder for a CSV: its category, else its own base name, so an uncategorized list gets a folder to itself. */
 export function groupOf(file: string, inDir = IN_DIR, outDir = OUT_DIR): string {
   return categoryOf(file, inDir, outDir) ?? baseName(file);
 }
 
 export function fileLayout(group: string, base: string, outDir = OUT_DIR): FileLayout {
-  const groupDir = path.join(outDir, group);
-  const emailsDir = path.join(groupDir, EMAILS_SUBDIR);
+  if (RESERVED.has(group)) throw new Error(`"${group}" can't be a category: results/${group}/ is reserved (the database, the output tree, the cross-category lists). Rename the folder under websites/.`);
+  const emailsDir = path.join(outDir, EMAILS_NAME, group);
   return {
     id: `${group}/${base}`,
     group,
     base,
-    groupDir,
     emailsDir,
     outFile: path.join(emailsDir, `${base}.csv`),
-    cacheDir: path.join(groupDir, '.cache'),
-    logDir: path.join(groupDir, 'logs'),
     filteredDir: path.join(emailsDir, 'filtered'),
     uniqueDir: path.join(emailsDir, 'unique'),
-    // dotted, so no list's own cache files (`<base>.jsonl`, `<base>.lock`) can share these names
-    pagesFile: path.join(groupDir, '.cache', '.pages'),
-    pagesLock: path.join(groupDir, '.cache', '.pages.lock'),
   };
 }
+
+/** The folder of the combined lists that span categories (--unique with files of several categories). */
+export const crossUniqueDir = (outDir = OUT_DIR) => path.join(outDir, EMAILS_NAME, 'unique');
 
 const isCsv = (e: fs.Dirent) => e.isFile() && e.name.toLowerCase().endsWith('.csv');
 
@@ -83,14 +104,14 @@ export function findInputs(inDir = IN_DIR): string[] {
   return files.sort();
 }
 
-/** Output CSVs per group folder (results/<group>/emails/*.csv, not its unique/ subfolder); the cross-group results/unique/ and results/logs/ are not groups. */
+/** Output CSVs per group folder (results/emails/<group>/*.csv, not its unique/ or filtered/ subfolders); the cross-category emails/unique/ is not a group. */
 export function findOutputs(outDir = OUT_DIR): Map<string, string[]> {
   const groups = new Map<string, string[]>();
-  if (!fs.existsSync(outDir)) return groups;
-  for (const e of fs.readdirSync(outDir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
-    if (!e.isDirectory() || e.name.startsWith('.') || e.name === 'unique' || e.name === 'logs') continue;
-    const dir = path.join(outDir, e.name, EMAILS_SUBDIR);
-    if (!fs.existsSync(dir)) continue;
+  const root = path.join(outDir, EMAILS_NAME);
+  if (!fs.existsSync(root)) return groups;
+  for (const e of fs.readdirSync(root, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+    if (!e.isDirectory() || e.name.startsWith('.') || e.name === 'unique') continue;
+    const dir = path.join(root, e.name);
     const csvs = fs.readdirSync(dir, { withFileTypes: true }).filter(isCsv).map((f) => path.join(dir, f.name)).sort();
     if (csvs.length) groups.set(e.name, csvs);
   }
