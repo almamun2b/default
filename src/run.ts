@@ -3,15 +3,17 @@ import path from 'node:path';
 import { parse } from 'csv-parse/sync';
 import { stringify } from 'csv-stringify/sync';
 import pLimit from 'p-limit';
-import { acquireLock, beginScrape, budgetRetry, cacheFiles, endScrape, ensureTrailingNewline, loadCache, pidAlive, planRetries, writeCacheAtomic, writeFileAtomic, type RetryFlags } from './cache.js';
+import { budgetRetry, planRetries, type RetryFlags } from './cache.js';
 import { CACHE_VERSION, mergeResults, resumeSite, scrapeSite, type CrawlOptions, type ResumeParts, type SiteResult } from './crawler.js';
+import type { Db } from './db/open.js';
+import { lockPid, pidAlive, writeFileAtomic } from './db/lock.js';
+import type { ListRef } from './db/sites-repo.js';
 import { filterRows, filterSummary, filterTag, type SuffixFilter } from './filter.js';
 import { readSites } from './input.js';
-import { PageStore } from './pages.js';
 import { undeliverable } from './mx.js';
 import { log, runId, withLogContext } from './logger.js';
 import { assignRows, recheckSite, uniqueLabel, uniqueRows, type Assigned, type Row } from './output.js';
-import { fileLayout, findOutputs, groupOf, OUT_DIR, ROOT, type FileLayout } from './paths.js';
+import { crossUniqueDir, fileLayout, findOutputs, groupOf, OUT_DIR, ROOT, type FileLayout } from './paths.js';
 import { baseHost } from './urls.js';
 
 const HARD_TIMEOUT_EXTRA_MS = 4 * 60_000; // hard safety net on top of scrapeSite's soft budget, which keeps partial results
@@ -23,33 +25,6 @@ export interface RunOptions extends CrawlOptions {
   checkMx?: boolean; // drop emails whose domain can't receive mail (--check-mx)
   revalidateDays: number; // stored pages older than this are requested again (--revalidate); 0 = every one, once per run
   filter?: SuffixFilter; // --include-suffix / --exclude-suffix: also write a filtered CSV; scraping and the normal CSV are unaffected
-}
-
-/** The page stores open in this run, one per category, each holding its lock (see openPages). */
-const stores = new Map<string, { store: PageStore; release: () => void }>();
-
-/**
- * The category's page store (results/<category>/.cache/.pages), opened once per run so all its lists share it.
- * Takes the category lock, because two runs appending to one store would corrupt its index; throws LockedError
- * if another live run holds it.
- */
-export function openPages(layout: FileLayout): PageStore {
-  const open = stores.get(layout.pagesFile);
-  if (open) return open.store;
-  fs.mkdirSync(layout.cacheDir, { recursive: true, mode: 0o700 });
-  const release = acquireLock(layout.pagesLock);
-  const store = new PageStore(layout.pagesFile);
-  stores.set(layout.pagesFile, { store, release });
-  return store;
-}
-
-/** Closes every page store of this run and frees its category lock. */
-export function closePages(): void {
-  for (const { store, release } of stores.values()) {
-    store.close();
-    release();
-  }
-  stores.clear();
 }
 
 /**
@@ -106,7 +81,7 @@ function reasonCode(error: string): string {
   return REASON_CODES.has(error) ? error : 'other';
 }
 
-/** Human-readable summary of one processed CSV; printed and appended to results/<group>/logs/<name>.log. */
+/** Human-readable summary of one processed CSV; printed and recorded in the list's list.end event in results/db/run-history.jsonl. */
 export function describe(o: RunOptions): string {
   return `${o.maxPages || 'unlimited'} pages, ${o.browserPages} browser pages, depth ${o.maxDepth || 'unlimited'}, ${o.budgetMs / 60_000} min/site, ${o.concurrency} sites in parallel, ${o.pageConcurrency} page requests per site, ${o.hostConcurrency} per server, stored pages revalidated after ${o.revalidateDays} days${o.checkMx ? ', MX check' : ''}`;
 }
@@ -130,45 +105,52 @@ async function checkedResults(done: Map<string, SiteResult>, checkMx: boolean): 
 
 export const filteredPath = (layout: FileLayout, filter: SuffixFilter) => path.join(layout.filteredDir, `${layout.base}.${filterTag(filter)}.csv`);
 
-/** results/<category>/emails/filtered/<name>.<filter>.csv from a list's rows, with a block in its summary log. */
-function writeFiltered(layout: FileLayout, rows: Row[], filter: SuffixFilter): void {
+/** results/emails/<category>/filtered/<name>.<filter>.csv from a list's rows, with its summary recorded in the run history. */
+function writeFiltered(db: Db, layout: FileLayout, rows: Row[], filter: SuffixFilter): void {
   const { kept, dropped } = filterRows(rows, filter);
   const out = filteredPath(layout, filter);
   writeCsv(out, kept);
   const text = filterSummary(`${layout.id}.csv`, filter, rows.length, kept.length, dropped, path.relative(ROOT, out));
-  fs.mkdirSync(layout.logDir, { recursive: true });
-  fs.appendFileSync(path.join(layout.logDir, `${layout.base}.log`), text + '\n');
+  db.runs.append({ t: 'filter.end', run: runId, cat: layout.group, list: layout.base, csv: path.relative(ROOT, out), emails: rows.length, kept: kept.length, text });
   log.info({ output: path.relative(ROOT, out), emails: rows.length, kept: kept.length }, '\n' + text);
 }
 
 /**
- * The filtered CSV of a list that is not scraped (it already has an output): rebuilt from its cache with the current
- * rules and written next to the others. The normal CSV and the cache are left alone, nothing is requested.
+ * The filtered CSV of a list that is not scraped (it already has an output): rebuilt from its stored results with
+ * the current rules and written next to the others. The normal CSV and the database are left alone, nothing is requested.
  */
-export async function filterFile(file: string, layout: FileLayout, opts: RunOptions): Promise<void> {
+export async function filterFile(db: Db, file: string, layout: FileLayout, opts: RunOptions): Promise<void> {
   if (!opts.filter) return;
-  const cf = cacheFiles(layout.cacheDir, layout.base);
+  const { group: cat, base: list } = layout;
   const rel = path.relative(ROOT, file);
-  if (fs.existsSync(cf.marker)) {
+  if (db.runs.interrupted(cat, list)) {
     log.warn({ input: rel }, `Skipping the filter for ${layout.id}: its last scrape was interrupted. Resume it first (re-run the scrape)`);
     return;
   }
-  if (!fs.existsSync(cf.cache) || !fs.statSync(cf.cache).size) {
-    log.warn({ input: rel, cacheFile: path.relative(ROOT, cf.cache) }, `Skipping the filter for ${layout.id}: no cache to filter`);
-    return;
-  }
-  const release = acquireLock(cf.lock);
+  const release = db.lockList(cat, list);
   try {
+    const stored = db.sites.loadList(cat, list);
+    if (!stored.size) {
+      log.warn({ input: rel }, `Skipping the filter for ${layout.id}: no stored results to filter`);
+      return;
+    }
     const input = readSites(file);
     if (!input.sites.length) return;
-    const { checked } = await checkedResults(loadCache(cf.cache), !!opts.checkMx);
-    writeFiltered(layout, assignRows(input.sites, checked, input.names).rows, opts.filter);
+    const { checked } = await checkedResults(stored, !!opts.checkMx);
+    writeFiltered(db, layout, assignRows(input.sites, checked, input.names).rows, opts.filter);
   } finally {
     release();
   }
 }
 
-function writeSummary(layout: FileLayout, sites: string[], done: Map<string, SiteResult>, out: Assigned, mode: string, startedAt: number, mxDropped?: string[]): void {
+/** What a finished list adds up to; stored in the `list.end` event next to the summary text. */
+interface Summary {
+  text: string;
+  counts: Record<string, number>;
+  reasons: Record<string, number>;
+}
+
+function summarize(layout: FileLayout, sites: string[], done: Map<string, SiteResult>, out: Assigned, mode: string, startedAt: number, mxDropped?: string[]): Summary {
   const uniqueEmails = out.rows.length;
   const results = sites.map((s) => done.get(s)).filter((r): r is SiteResult => !!r);
   const withEmails = results.filter((r) => r.emails.length > 0);
@@ -200,13 +182,13 @@ function writeSummary(layout: FileLayout, sites: string[], done: Map<string, Sit
     `[${stamp}] ${layout.id}.csv  (${mode}, took ${fmtDuration(Date.now() - startedAt)})`,
     `  Websites : ${sites.length} total | ${withEmails.length} with emails | ${noEmails.length} no emails found | ${failed.length} failed`,
     `  Emails   : ${uniqueEmails} unique (${k.person} person name, ${k.department} department page title, ${k.input} input name, ${k.business} business name)`,
-    `  Crawl    : ${fetched} pages fetched${reused ? ` + ${reused} reused (already scraped in this category, not requested again)` : ''} | headless browser used on ${results.filter((r) => r.usedBrowser).length} sites`,
+    `  Crawl    : ${fetched} pages fetched${reused ? ` + ${reused} reused (already scraped, not requested again)` : ''} | headless browser used on ${results.filter((r) => r.usedBrowser).length} sites`,
   ];
   if (mxDropped) {
     const list = mxDropped.slice(0, 5).join(', ') + (mxDropped.length > 5 ? ', …' : '');
     lines.push(`  MX check : ${mxDropped.length ? `${mxDropped.length} email(s) dropped, their domain can't receive mail: ${list}` : "every email's domain can receive mail"}`);
   }
-  if (missing) lines.push(`  Missing  : ${missing} site(s) not in the cache yet (not scraped)`);
+  if (missing) lines.push(`  Missing  : ${missing} site(s) not scraped yet (no stored result)`);
   if (reasons.size) lines.push(`  Failures : ${[...reasons].map(([k, v]) => `${k}=${v}${breakdown(k)}`).join(', ')}`);
   if (partial.length) lines.push(`  Partial  : ${partial.length} site(s) hit an error/time limit but kept what was found`);
   const limited = results.filter((r) => r.rateLimited);
@@ -233,34 +215,36 @@ function writeSummary(layout: FileLayout, sites: string[], done: Map<string, Sit
   if (failed.length) lines.push(`  Failed sites:\n${failed.map((r) => `    - ${host(r)} [${r.error}${r.errorDetail ? `: ${r.errorDetail}` : ''}]`).join('\n')}`);
   if (noEmails.length) lines.push(`  No emails found on:\n${noEmails.map((r) => `    - ${host(r)}`).join('\n')}`);
   const text = lines.join('\n') + '\n';
-  fs.mkdirSync(layout.logDir, { recursive: true });
-  fs.appendFileSync(path.join(layout.logDir, `${layout.base}.log`), text + '\n');
-  log.info({ sites: sites.length, withEmails: withEmails.length, noEmails: noEmails.length, failed: failed.length, uniqueEmails, failures: Object.fromEntries(reasons) }, '\n' + text);
+  const counts = {
+    sites: sites.length, withEmails: withEmails.length, noEmails: noEmails.length, failed: failed.length, missing,
+    uniqueEmails, pagesFetched: fetched, pagesReused: reused, browserSites: results.filter((r) => r.usedBrowser).length,
+  };
+  log.info({ ...counts, failures: Object.fromEntries(reasons) }, '\n' + text);
+  return { text, counts, reasons: Object.fromEntries(reasons) };
 }
 
 /**
- * `retry` is set for a --retry-* run: only the sites it selects are crawled, the rest come from the cache.
- * `newOnly` keeps the cache of a finished run too, so only sites that aren't in it are crawled.
+ * `retry` is set for a --retry-* run: only the sites it selects are crawled, the rest come from the stored results.
+ * `newOnly` keeps the stored results of a finished run too, so only sites that aren't in them are crawled.
  */
-export async function processFile(file: string, layout: FileLayout, opts: RunOptions, retry: RetryFlags | null, summaryOnly = false, newOnly = false): Promise<void> {
+export async function processFile(db: Db, file: string, layout: FileLayout, opts: RunOptions, retry: RetryFlags | null, summaryOnly = false, newOnly = false): Promise<void> {
   const startedAt = Date.now();
-  const { base, outFile } = layout;
-  fs.mkdirSync(layout.cacheDir, { recursive: true, mode: 0o700 });
-  const cf = cacheFiles(layout.cacheDir, base);
+  const { group: cat, base: list, outFile } = layout;
   const rel = (f: string) => path.relative(ROOT, f);
+  const interrupted = !!db.runs.interrupted(cat, list);
 
   if (summaryOnly) {
-    if (fs.existsSync(cf.marker)) {
+    if (interrupted) {
       log.warn({ input: rel(file) }, `Skipping ${layout.id}: its last scrape was interrupted. Resume it first (re-run the scrape), then rebuild`);
       return;
     }
-    if (!fs.existsSync(cf.cache) || !fs.statSync(cf.cache).size) {
-      log.warn({ input: rel(file), cacheFile: rel(cf.cache) }, `Skipping ${layout.id}: no cache to rebuild from, so ${rel(outFile)} is left untouched`);
+    if (!db.sites.loadList(cat, list).size) {
+      log.warn({ input: rel(file) }, `Skipping ${layout.id}: no stored results to rebuild from, so ${rel(outFile)} is left untouched`);
       return;
     }
   }
 
-  const release = acquireLock(cf.lock);
+  const release = db.lockList(cat, list);
   try {
     const input = readSites(file);
     const { sites } = input;
@@ -273,23 +257,24 @@ export async function processFile(file: string, layout: FileLayout, opts: RunOpt
     }
 
     // A fresh re-scrape of a list asks again for every stored page (conditionally); anything else reuses pages up to --revalidate days old.
-    const fresh = !summaryOnly && !retry && !newOnly && !fs.existsSync(cf.marker) && fs.existsSync(outFile);
+    const outputExists = fs.existsSync(outFile);
+    const fresh = !summaryOnly && !retry && !newOnly && !interrupted && outputExists;
     const cutoff = fresh ? startedAt : startedAt - opts.revalidateDays * 86_400_000;
-    if (!summaryOnly) {
-      const { resumed, rotatedTo } = beginScrape(cf, fs.existsSync(outFile), !!retry || newOnly);
-      if (resumed) log.info({ cacheFile: rel(cf.cache) }, `${layout.id}: resuming an interrupted scrape from the cache`);
-      if (rotatedTo) log.info({ previousCache: rel(rotatedTo) }, `${layout.id}: previous cache kept as ${rel(rotatedTo)}`);
-      ensureTrailingNewline(cf.cache);
-    }
-    // Every page this category fetches is kept, here and in later runs: a page is not requested twice.
+    const retried = retry ? [retry.failed && 'failed', retry.rateLimited && 'rate-limited', retry.budget && 'budget-queued', retry.capped && 'capped'].filter(Boolean) : [];
+    let who: ListRef = { cat, list, g: db.generation(cat, list), run: runId };
     const crawlOpts: RunOptions = { ...opts };
     if (!summaryOnly) {
-      const store = openPages(layout);
+      const begun = db.beginList({ cat, list, run: runId, mode: retried.length ? `retry ${retried.join(' + ')}` : newOnly ? 'new-only' : 'scrape', sites: sites.length, outputExists, keep: !!retry || newOnly });
+      who = begun;
+      if (begun.resumed) log.info({ generation: begun.g }, `${layout.id}: resuming an interrupted scrape from its stored results`);
+      if (begun.fresh) log.info({ generation: begun.g }, `${layout.id}: scraping again; the earlier results stay in the database as generation ${begun.g - 1}`);
+      // Every page fetched is kept, here and in later runs, whatever the category: a page is not requested twice.
+      const store = db.pagesFor({ cat, list, run: runId });
       crawlOpts.pages = store;
       crawlOpts.pagesCutoff = cutoff;
-      if (store.pages) log.info({ pages: store.pages }, `${layout.id}: ${store.pages} pages already scraped in this category are reused unless older than ${fresh ? 'this run' : `${opts.revalidateDays} days`}`);
+      if (store.pages) log.info({ pages: store.pages }, `${layout.id}: ${store.pages} pages already scraped are reused unless older than ${fresh ? 'this run' : `${opts.revalidateDays} days`}`);
     }
-    const done = loadCache(cf.cache);
+    const done = db.sites.loadList(cat, list, who.g);
     // Re-crawled rows that had emails: kept as they were, plus any new emails the re-crawl finds (mergeResults).
     let previous = new Map<string, SiteResult>();
     const resumes = new Map<string, { prev: SiteResult; parts: ResumeParts }>();
@@ -298,13 +283,13 @@ export async function processFile(file: string, layout: FileLayout, opts: RunOpt
       previous = plan.previous;
       for (const [site, parts] of plan.resume) resumes.set(site, { prev: done.get(site)!, parts });
       for (const site of [...plan.recrawl, ...plan.resume.keys()]) done.delete(site);
-      // Rows being redone stay in the file until their new line supersedes them (a later line wins in loadCache),
-      // so an interrupted retry loses nothing. Only failures with nothing found are dropped, to be scraped again.
-      writeCacheAtomic(cf.cache, [...previous.values(), ...[...resumes.values()].map((x) => x.prev), ...done.values()]);
+      // Rows being redone stay stored until their new row supersedes them (the latest row of a site wins), so an
+      // interrupted retry loses nothing. Only failures with nothing found are dropped, to be scraped again.
+      for (const site of plan.recrawl) if (!previous.has(site)) db.sites.drop(who, site);
       log.info({ recrawl: plan.recrawl.size, resume: plan.resume.size }, `${layout.id}: retrying ${plan.recrawl.size + plan.resume.size} site(s): ${plan.recrawl.size} crawled again from the start, ${plan.resume.size} continued from where they stopped`);
     }
-    log.info({ input: rel(file), sites: sites.length, cached: done.size }, `\n=== ${layout.id}: ${sites.length} sites (${done.size} cached) ===`);
-    if (newOnly && !summaryOnly) log.info({ new: sites.filter((s) => !done.has(s)).length }, `${layout.id}: --new-only: ${sites.filter((s) => !done.has(s)).length} new site(s) to scrape, the cached ones are kept`);
+    log.info({ input: rel(file), sites: sites.length, stored: done.size }, `\n=== ${layout.id}: ${sites.length} sites (${done.size} stored) ===`);
+    if (newOnly && !summaryOnly) log.info({ new: sites.filter((s) => !done.has(s)).length }, `${layout.id}: --new-only: ${sites.filter((s) => !done.has(s)).length} new site(s) to scrape, the stored ones are kept`);
 
     let n = sites.filter((s) => done.has(s)).length;
     const limit = pLimit(opts.concurrency);
@@ -324,7 +309,7 @@ export async function processFile(file: string, layout: FileLayout, opts: RunOpt
             r = merged;
           }
           done.set(site, r);
-          fs.appendFileSync(cf.cache, JSON.stringify(r) + '\n', { mode: 0o600 });
+          db.sites.append(who, r);
           n++;
           const ms = Date.now() - t0;
           const fields = { finalUrl: r.finalUrl, emails: r.emails.length, pages: r.pages, usedBrowser: r.usedBrowser, error: r.error, durationMs: ms };
@@ -336,7 +321,7 @@ export async function processFile(file: string, layout: FileLayout, opts: RunOpt
       ),
     );
 
-    // Outputs use the current rules even for cached rows; the cache file keeps what was scraped.
+    // Outputs use the current rules even for stored rows; the database keeps what was scraped.
     const { checked, mxDropped } = await checkedResults(done, !!opts.checkMx);
     const assigned = assignRows(sites, checked, input.names);
     const { rows } = assigned;
@@ -344,11 +329,14 @@ export async function processFile(file: string, layout: FileLayout, opts: RunOpt
     const withEmails = sites.filter((s) => (checked.get(s)?.emails.length ?? 0) > 0).length;
     const failed = sites.filter((s) => { const r = checked.get(s); return r?.error && !r.emails.length; }).length;
     log.info({ output: rel(outFile), emails: rows.length, withEmails, failed }, `=> ${rel(outFile)}: ${rows.length} emails from ${withEmails}/${sites.length} sites (${failed} failed/unreachable)`);
-    const retried = retry ? [retry.failed && 'failed', retry.rateLimited && 'rate-limited', retry.budget && 'budget-queued', retry.capped && 'capped'].filter(Boolean) : [];
-    const mode = summaryOnly ? 'summary rebuilt from cache' : `${retried.length ? `retry ${retried.join(' + ')}` : 'scrape'}: ${describe(opts)}`;
-    writeSummary(layout, sites, checked, assigned, mode, startedAt, mxDropped);
-    if (opts.filter) writeFiltered(layout, rows, opts.filter);
-    if (!summaryOnly) endScrape(cf);
+    const mode = summaryOnly ? 'summary rebuilt from stored results' : `${retried.length ? `retry ${retried.join(' + ')}` : 'scrape'}: ${describe(opts)}`;
+    const summary = summarize(layout, sites, checked, assigned, mode, startedAt, mxDropped);
+    if (opts.filter) writeFiltered(db, layout, rows, opts.filter);
+    // The end of the list. A scrape cut off before this line is resumed by the next run.
+    db.runs.append({
+      t: 'list.end', run: runId, cat, list, g: who.g, status: 'finished', mode: summaryOnly ? 'summary' : retried.length ? 'retry' : newOnly ? 'new-only' : 'scrape',
+      durationMs: Date.now() - startedAt, csv: rel(outFile), counts: summary.counts, reasons: summary.reasons, text: summary.text,
+    });
   } finally {
     release();
   }
@@ -361,9 +349,10 @@ function readRows(file: string): Row[] {
 
 /**
  * --unique: every email once across the given output CSVs, written to `outFile`. Reads finished outputs only;
- * per-file CSVs and caches are left alone and nothing is scraped. `label` names the combined file and its log.
+ * per-file CSVs and the database are left alone and nothing is scraped. `label` names the combined file; `cat` is
+ * its category (null for a list spanning several).
  */
-export function writeUnique(inputs: { id: string; file: string }[], label: string, outFile: string, logDir: string, filter?: SuffixFilter): void {
+export function writeUnique(db: Db, inputs: { id: string; file: string }[], label: string, outFile: string, cat: string | null, filter?: SuffixFilter): void {
   const startedAt = Date.now();
   const files: { base: string; rows: Row[] }[] = [];
   const missing: string[] = [];
@@ -394,22 +383,21 @@ export function writeUnique(inputs: { id: string; file: string }[], label: strin
     ...(top.length ? [`  Overlap  : ${top.map(([k, n]) => `${k} ${n}`).join('; ')}`] : []),
     '',
   ].join('\n') + filtered;
-  fs.mkdirSync(logDir, { recursive: true });
-  fs.appendFileSync(path.join(logDir, `unique.${label}.log`), text + '\n');
+  db.runs.append({ t: 'unique.end', run: runId, cat, label, csv: path.relative(ROOT, outFile), files: files.length, rowsRead: read, uniqueEmails: rows.length, text });
   log.info({ output: path.relative(ROOT, outFile), files: files.length, rowsRead: read, uniqueEmails: rows.length }, '\n' + text);
 }
 
 /**
- * --unique with no files: one combined list per group folder, written inside it (results/<group>/emails/unique/<group>.csv).
- * With files: the files' own group if they share one (results/<group>/emails/unique/<label>.csv), else a cross-group
- * list in results/unique/, the only output that lives outside a group folder.
+ * --unique with no files: one combined list per category, written inside it (results/emails/<category>/unique/<category>.csv).
+ * With files: the files' own category if they share one (results/emails/<category>/unique/<label>.csv), else a cross-category
+ * list in results/emails/unique/.
  */
-export function runUnique(fileArgs: string[], filter?: SuffixFilter): void {
+export function runUnique(db: Db, fileArgs: string[], filter?: SuffixFilter): void {
   if (!fileArgs.length) {
     for (const [group, csvs] of findOutputs(OUT_DIR)) {
       const l = fileLayout(group, group);
       const inputs = csvs.map((file) => ({ id: path.basename(file, '.csv'), file }));
-      writeUnique(inputs, group, path.join(l.uniqueDir, `${group}.csv`), l.logDir, filter);
+      writeUnique(db, inputs, group, path.join(l.uniqueDir, `${group}.csv`), group, filter);
     }
     return;
   }
@@ -423,20 +411,20 @@ export function runUnique(fileArgs: string[], filter?: SuffixFilter): void {
   const label = uniqueLabel(uniq.map((i) => path.basename(i.file, '.csv')));
   if (groups.size === 1) {
     const l = fileLayout([...groups][0], label);
-    writeUnique(uniq, label, path.join(l.uniqueDir, `${label}.csv`), l.logDir, filter);
+    writeUnique(db, uniq, label, path.join(l.uniqueDir, `${label}.csv`), [...groups][0], filter);
   } else {
-    writeUnique(uniq, label, path.join(OUT_DIR, 'unique', `${label}.csv`), path.join(OUT_DIR, 'logs'), filter);
+    writeUnique(db, uniq, label, path.join(crossUniqueDir(), `${label}.csv`), null, filter);
   }
 }
 
-/** --dry-run: what processFile would do with one file. Reads the input and cache; writes nothing and takes no lock. */
-export function previewFile(file: string, layout: FileLayout, retry: RetryFlags | null, summaryOnly: boolean, newOnly = false, filter?: SuffixFilter): string {
-  const text = previewBase(file, layout, retry, summaryOnly, newOnly);
+/** --dry-run: what processFile would do with one file. Reads the input and the database; writes nothing and takes no lock. */
+export function previewFile(db: Db, file: string, layout: FileLayout, retry: RetryFlags | null, summaryOnly: boolean, newOnly = false, filter?: SuffixFilter): string {
+  const text = previewBase(db, file, layout, retry, summaryOnly, newOnly);
   return filter && !/would (be )?skipped?|would fail/.test(text) ? `${text}; then would write the filtered CSV ${path.relative(ROOT, filteredPath(layout, filter))}` : text;
 }
 
-function previewBase(file: string, layout: FileLayout, retry: RetryFlags | null, summaryOnly: boolean, newOnly: boolean): string {
-  const cf = cacheFiles(layout.cacheDir, layout.base);
+function previewBase(db: Db, file: string, layout: FileLayout, retry: RetryFlags | null, summaryOnly: boolean, newOnly: boolean): string {
+  const { group: cat, base: list } = layout;
   let input: ReturnType<typeof readSites>;
   try {
     input = readSites(file);
@@ -445,45 +433,41 @@ function previewBase(file: string, layout: FileLayout, retry: RetryFlags | null,
   }
   const n = input.sites.length;
   const skipped = input.invalid || input.duplicates ? ` (${input.invalid} invalid and ${input.duplicates} duplicate row(s) skipped)` : '';
-  const lockPid = fs.existsSync(cf.lock) ? Number(fs.readFileSync(cf.lock, 'utf8').trim()) : 0;
-  if (lockPid && pidAlive(lockPid)) return `${layout.id}: in use by another run (pid ${lockPid}); would be skipped`;
+  const holder = lockPid(db.listLockFile(cat, list));
+  if (holder && pidAlive(holder)) return `${layout.id}: in use by another run (pid ${holder}); would be skipped`;
   if (!n) return `${layout.id}: no websites in the input; would be skipped`;
-  const done = loadCache(cf.cache);
+  const done = db.sites.loadList(cat, list);
   const cached = input.sites.filter((s) => done.has(s)).length;
-  const interrupted = fs.existsSync(cf.marker);
+  const interrupted = !!db.runs.interrupted(cat, list);
   const hasOutput = fs.existsSync(layout.outFile);
   if (summaryOnly) {
     if (interrupted) return `${layout.id}: its last scrape was interrupted; would be skipped (resume it first)`;
-    if (!done.size) return `${layout.id}: no cache to rebuild from; would be skipped`;
-    return `${layout.id}: would rebuild the CSV and summary from ${cached} of ${n} cached sites${skipped}`;
+    if (!done.size) return `${layout.id}: no stored results to rebuild from; would be skipped`;
+    return `${layout.id}: would rebuild the CSV and summary from ${cached} of ${n} stored sites${skipped}`;
   }
   if (retry) {
     const inInput = new Map(input.sites.filter((s) => done.has(s)).map((s) => [s, done.get(s)!]));
     const plan = planRetries(inInput, retry);
     return `${layout.id}: would re-crawl ${plan.recrawl.size} and continue ${plan.resume.size} of ${n} sites${n - cached ? `, and scrape ${n - cached} not scraped yet` : ''}${skipped}`;
   }
-  if (newOnly) return `${layout.id}: ${n - cached ? `would scrape ${n - cached} new sites; ${cached} cached sites reused` : `nothing new (all ${n} sites cached); would only rebuild the CSV and summary`}${skipped}`;
-  if (interrupted) return `${layout.id}: would resume an interrupted scrape: ${cached} of ${n} sites cached, ${n - cached} to scrape${skipped}`;
-  if (hasOutput) return `${layout.id}: would scrape all ${n} sites again (the current cache is kept as ${layout.base}.<time>.jsonl)${skipped}`;
-  return `${layout.id}: would scrape ${n - cached} sites${cached ? ` (${cached} more already cached by an earlier run)` : ''}${skipped}`;
+  if (newOnly) return `${layout.id}: ${n - cached ? `would scrape ${n - cached} new sites; ${cached} stored sites reused` : `nothing new (all ${n} sites stored); would only rebuild the CSV and summary`}${skipped}`;
+  if (interrupted) return `${layout.id}: would resume an interrupted scrape: ${cached} of ${n} sites stored, ${n - cached} to scrape${skipped}`;
+  if (hasOutput) return `${layout.id}: would scrape all ${n} sites again (the current results stay in the database as an earlier generation)${skipped}`;
+  return `${layout.id}: would scrape ${n - cached} sites${cached ? ` (${cached} more already stored by an earlier run)` : ''}${skipped}`;
 }
 
-/** --dry-run: interrupted-scrape markers whose input list is gone, and locks left by runs that died. */
-export function staleState(inputs: string[], outDir = OUT_DIR): string[] {
+/** --dry-run: interrupted lists whose input list is gone, and locks left by runs that died. */
+export function staleState(db: Db, inputs: string[]): string[] {
   const out: string[] = [];
-  const known = new Set(inputs.map((f) => { const l = fileLayout(groupOf(f), path.basename(f, path.extname(f)), outDir); return path.join(l.cacheDir, l.base); }));
-  if (!fs.existsSync(outDir)) return out;
-  for (const g of fs.readdirSync(outDir, { withFileTypes: true })) {
-    const dir = path.join(outDir, g.name, '.cache');
-    if (!g.isDirectory() || !fs.existsSync(dir)) continue;
-    for (const f of fs.readdirSync(dir)) {
-      const full = path.join(dir, f);
-      if (f.endsWith('.inprogress') && !known.has(full.slice(0, -'.inprogress'.length))) {
-        out.push(`${path.relative(ROOT, full)}: an interrupted scrape whose input list is gone (not under websites/)`);
-      } else if (f.endsWith('.lock')) {
-        const pid = Number(fs.readFileSync(full, 'utf8').trim());
-        if (!pid || !pidAlive(pid)) out.push(`${path.relative(ROOT, full)}: left by a run that is gone (pid ${pid || '?'}); the next run takes it over`);
-      }
+  const known = new Set(inputs.map((f) => `${groupOf(f)}/${path.basename(f, path.extname(f))}`));
+  for (const { cat, list, start } of db.runs.interruptedLists()) {
+    if (!known.has(`${cat}/${list}`)) out.push(`${cat}/${list}: an interrupted scrape (run ${start.run}) whose input list is gone (not under websites/)`);
+  }
+  if (fs.existsSync(db.files.locksDir)) {
+    for (const f of fs.readdirSync(db.files.locksDir)) {
+      if (!f.endsWith('.lock')) continue;
+      const pid = lockPid(path.join(db.files.locksDir, f));
+      if (!pid || !pidAlive(pid)) out.push(`${path.relative(ROOT, path.join(db.files.locksDir, f))}: left by a run that is gone (pid ${pid || '?'}); the next run takes it over`);
     }
   }
   return out;

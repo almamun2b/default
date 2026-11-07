@@ -1,18 +1,18 @@
 /**
- * Shows what the current email/name rules would change in the cached results, without writing anything.
+ * Shows what the current email/name rules would change in the stored results, without writing anything.
  * Use it after editing extract.ts (or the row assignment in output.ts) to review the effect on every real row
  * scraped so far.
  *
- *   npx tsx scripts/recheck-cache.ts            # all caches
+ *   npx tsx scripts/recheck-cache.ts            # all lists
  *   npx tsx scripts/recheck-cache.ts au.ford    # one file (or dealers/au.ford)
  *   npx tsx scripts/recheck-cache.ts --all      # print every change, not a sample
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { loadCache } from '../src/cache.js';
 import type { SiteResult } from '../src/crawler.js';
 import { readSites } from '../src/input.js';
 import { assignRows, recheckSite } from '../src/output.js';
+import { Db } from '../src/db/open.js';
 import { IN_DIR, OUT_DIR } from '../src/paths.js';
 
 const args = process.argv.slice(2);
@@ -20,16 +20,14 @@ const showAll = args.includes('--all');
 const only = args.filter((a) => !a.startsWith('--'));
 const SAMPLE = 25;
 
-// results/<group>/.cache/<base>.jsonl; `id` is <group>/<base>
-const files = fs.readdirSync(OUT_DIR, { withFileTypes: true })
-  .filter((d) => d.isDirectory() && fs.existsSync(path.join(OUT_DIR, d.name, '.cache')))
-  .flatMap((d) => fs.readdirSync(path.join(OUT_DIR, d.name, '.cache'))
-    .filter((f) => /^[^.]+(\.[^.]+)*\.jsonl$/.test(f) && !/\.\d{8}-\d{6}\.jsonl$/.test(f)) // skip rotated caches
-    .map((f) => ({ group: d.name, base: f.replace(/\.jsonl$/, ''), file: path.join(OUT_DIR, d.name, '.cache', f) })))
-  .map((c) => ({ ...c, id: `${c.group}/${c.base}` }))
+// every list that has stored results (results/db/sites.jsonl); `id` is <group>/<base>
+const db = new Db(OUT_DIR, { readOnly: true });
+const files = db.sites.listSummaries()
+  .map((l) => ({ group: l.cat, base: l.list, g: l.g, id: `${l.cat}/${l.list}` }))
+  .sort((a, b) => a.id.localeCompare(b.id))
   .filter((c) => !only.length || only.includes(c.id) || only.includes(c.base));
 
-/** The input list for a cache, for its site order and name column; null when the input is gone. */
+/** The input list of a stored list, for its site order and name column; null when the input is gone. */
 function inputOf(group: string, base: string) {
   for (const f of [path.join(IN_DIR, group, `${base}.csv`), path.join(IN_DIR, `${base}.csv`)]) {
     if (fs.existsSync(f)) {
@@ -55,8 +53,8 @@ const nameGained: string[] = [];
 const moved: string[] = [];
 const named: string[] = [];
 
-for (const { group, base, file, id } of files) {
-  const done = loadCache(file);
+for (const { group, base, g, id } of files) {
+  const done = db.sites.loadList(group, base, g);
   for (const r of done.values()) {
     const after = new Map(recheckSite(r).emails.map((e) => [e.email, e]));
     const used = new Set<string>();
@@ -64,7 +62,7 @@ for (const { group, base, file, id } of files) {
       rows++;
       let now = after.get(e.email);
       if (!now) {
-        const match = [...after.values()].find((a) => !used.has(a.email) && !r.emails.some((o) => o.email === a.email));
+        const match = [...after.values()].find((a) => !used.has(a.email) && !r.emails.some((o: { email: string }) => o.email === a.email));
         if (match) { used.add(match.email); decoded.push(`${e.email} → ${match.email}`); now = match; } else { dropped.push(e.email); continue; }
       }
       if (e.name && !now.name) nameLost.push(`${e.email}: "${e.name}"`);
@@ -91,7 +89,7 @@ const show = (title: string, list: string[]) => {
   for (const l of showAll ? list : list.slice(0, SAMPLE)) console.log('  ' + l);
   if (!showAll && list.length > SAMPLE) console.log(`  … ${list.length - SAMPLE} more (--all to list)`);
 };
-console.log(`${files.length} cache file(s), ${rows} email rows`);
+console.log(`${files.length} list(s), ${rows} email rows`);
 show('Emails dropped', dropped);
 show('Emails decoded (ROT13)', decoded);
 show('Person names removed', nameLost);

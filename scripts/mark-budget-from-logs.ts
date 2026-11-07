@@ -1,22 +1,24 @@
 /**
- * Marks cached sites that ran out of time budget before the cache recorded it (rows older than v3), using the
+ * Marks stored sites that ran out of time budget before the database recorded it (rows older than v3), using the
  * "time budget used up" / "stopped at the hard time limit" lines in logs/scraper-*.log, so that
  * `--retry-budget-queued` picks them up. Their queue was never saved, so that retry crawls them again from the
  * start and keeps the earlier result if it finds fewer emails.
  *
  *   npx tsx scripts/mark-budget-from-logs.ts           # show what would be marked; writes nothing
- *   npx tsx scripts/mark-budget-from-logs.ts --write   # append the marked rows to the caches
+ *   npx tsx scripts/mark-budget-from-logs.ts --write   # append the marked rows to the database
  *
  * A row is marked only if its page count still matches the log line, so a site scraped again since is left
- * alone. Marked rows are appended (the last line wins), so nothing in a cache is rewritten or deleted.
+ * alone. Marked rows are appended (the last row of a site wins), so nothing stored is rewritten or deleted.
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { acquireLock, cacheFiles, ensureTrailingNewline, loadCache, LockedError } from '../src/cache.js';
+import { LockedError } from '../src/db/lock.js';
+import { Db } from '../src/db/open.js';
 import type { SiteResult } from '../src/crawler.js';
 import { LOG_DIR } from '../src/logger.js';
-import { fileLayout, OUT_DIR, ROOT } from '../src/paths.js';
+import { OUT_DIR } from '../src/paths.js';
+import { runId } from '../src/logger.js';
 
 export interface BudgetHit {
   file: string; // the log's `file` field: <group>/<base>, or just <base> before category folders
@@ -48,7 +50,7 @@ export function budgetHits(lines: Iterable<string>): BudgetHit[] {
   return [...latest.values()];
 }
 
-/** `<group>/<base>` for a log's file field; a bare base resolves only if exactly one group's cache has it. */
+/** `<group>/<base>` for a log's file field; a bare base resolves only if exactly one group has stored results for it. */
 export function resolveCacheId(file: string, groupsByBase: Map<string, string[]>): string | null {
   if (file.includes('/')) return file;
   const groups = groupsByBase.get(file) ?? [];
@@ -57,7 +59,7 @@ export function resolveCacheId(file: string, groupsByBase: Map<string, string[]>
 
 /** The cached row with its queue count added, or why it is left alone. */
 export function markRow(r: SiteResult | undefined, hit: BudgetHit): { row: SiteResult } | { skip: string } {
-  if (!r) return { skip: 'not in the cache' };
+  if (!r) return { skip: 'not stored' };
   if (r.budgetQueued || r.resume) return { skip: 'already marked' };
   if ((r.v ?? 0) >= 3) return { skip: 'scraped again since' };
   if (r.error === 'robots-disallowed') return { skip: 'robots-disallowed' };
@@ -75,39 +77,31 @@ function main(): void {
     return;
   }
 
+  const db = new Db(OUT_DIR, { readOnly: !write });
   const groupsByBase = new Map<string, string[]>();
-  for (const d of fs.existsSync(OUT_DIR) ? fs.readdirSync(OUT_DIR, { withFileTypes: true }) : []) {
-    const dir = path.join(OUT_DIR, d.name, '.cache');
-    if (!d.isDirectory() || !fs.existsSync(dir)) continue;
-    for (const f of fs.readdirSync(dir)) {
-      if (!f.endsWith('.jsonl') || /\.\d{8}-\d{6}\.jsonl$/.test(f)) continue; // skip rotated caches
-      const base = f.slice(0, -'.jsonl'.length);
-      groupsByBase.set(base, [...(groupsByBase.get(base) ?? []), d.name]);
-    }
-  }
+  for (const l of db.sites.listSummaries()) groupsByBase.set(l.list, [...(groupsByBase.get(l.list) ?? []), l.cat]);
 
-  const byCache = new Map<string, BudgetHit[]>();
+  const byList = new Map<string, BudgetHit[]>();
   for (const h of hits) {
     const id = resolveCacheId(h.file, groupsByBase);
     if (!id) {
-      console.log(`  ? ${h.file}: no single cache found for this log entry (${h.site})`);
+      console.log(`  ? ${h.file}: no single list found for this log entry (${h.site})`);
       continue;
     }
-    byCache.set(id, [...(byCache.get(id) ?? []), h]);
+    byList.set(id, [...(byList.get(id) ?? []), h]);
   }
 
   let marked = 0;
   const toRetry: string[] = [];
-  for (const [id, list] of [...byCache].sort((a, b) => a[0].localeCompare(b[0]))) {
+  for (const [id, list] of [...byList].sort((a, b) => a[0].localeCompare(b[0]))) {
     const [group, base] = id.split('/');
-    const cf = cacheFiles(fileLayout(group, base).cacheDir, base);
-    console.log(`\n${id}  (${path.relative(ROOT, cf.cache)})`);
-    if (!fs.existsSync(cf.cache)) { console.log('  no cache file; skipped'); continue; }
-    if (fs.existsSync(cf.marker)) { console.log('  a scrape of this file is running or was interrupted; skipped (run this again once it has finished)'); continue; }
+    console.log(`\n${id}`);
+    if (!db.sites.generation(group, base)) { console.log('  no stored results; skipped'); continue; }
+    if (db.runs.interrupted(group, base)) { console.log('  a scrape of this list is running or was interrupted; skipped (run this again once it has finished)'); continue; }
     let release: (() => void) | undefined;
     if (write) {
       try {
-        release = acquireLock(cf.lock);
+        release = db.lockList(group, base);
       } catch (err) {
         if (!(err instanceof LockedError)) throw err;
         console.log(`  ${err.message}; skipped`);
@@ -115,7 +109,8 @@ function main(): void {
       }
     }
     try {
-      const done = loadCache(cf.cache);
+      const g = db.sites.generation(group, base);
+      const done = db.sites.loadList(group, base, g);
       const rows: SiteResult[] = [];
       for (const h of list) {
         const m = markRow(done.get(h.site), h);
@@ -124,17 +119,15 @@ function main(): void {
       }
       if (rows.length) toRetry.push(id);
       marked += rows.length;
-      if (write && rows.length) {
-        ensureTrailingNewline(cf.cache);
-        fs.appendFileSync(cf.cache, rows.map((r) => JSON.stringify(r) + '\n').join(''));
-      }
+      if (write) for (const r of rows) db.sites.append({ cat: group, list: base, g, run: runId }, r);
     } finally {
       release?.();
     }
   }
+  db.close();
 
   console.log(`\n${marked} site(s) ${write ? 'marked' : 'would be marked'}.`);
-  if (marked && !write) console.log('Run again with --write to append them to the caches.');
+  if (marked && !write) console.log('Run again with --write to append them to the database.');
   if (marked && write) {
     console.log('Continue them with, for example:');
     for (const id of toRetry) console.log(`  npm run scrape -- websites/${id}.csv --retry-budget-queued=60`);

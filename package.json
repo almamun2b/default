@@ -7,7 +7,9 @@
   "scripts": {
     "scrape": "UV_THREADPOOL_SIZE=${UV_THREADPOOL_SIZE:-16} node --import tsx src/index.ts",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test test/*.test.ts"
+    "test": "node --import tsx --test test/*.test.ts",
+    "db:migrate": "node --import tsx scripts/db-migrate.ts",
+    "db:verify": "node --import tsx scripts/db-verify.ts"
   },
   "dependencies": {
     "cheerio": "^1.2.0",

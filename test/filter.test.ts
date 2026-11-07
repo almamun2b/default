@@ -4,10 +4,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { parse } from 'csv-parse/sync';
-import { cacheFiles, writeCacheAtomic } from '../src/cache.js';
 import { LIST_FLAGS, parseArgs, suffixFilter, USAGE } from '../src/cli.js';
 import { DEFAULT_OPTIONS, type SiteResult } from '../src/crawler.js';
 import { describeFilter, filterRows, filterTag, keepEmail, matchesSuffix, parseSuffixes } from '../src/filter.js';
+import { Db } from '../src/db/open.js';
 import { fileLayout } from '../src/paths.js';
 import { filterFile, filteredPath, previewFile, processFile, writeUnique } from '../src/run.js';
 
@@ -78,50 +78,59 @@ function setup() {
   const dir = tmp();
   const input = path.join(dir, 'list.csv');
   fs.writeFileSync(input, 'name,website\nAlpha,a.com.au\nBeta,b.com\n');
-  const layout = fileLayout('dealers', 'list', path.join(dir, 'results'));
-  fs.mkdirSync(layout.cacheDir, { recursive: true });
-  writeCacheAtomic(cacheFiles(layout.cacheDir, 'list').cache, [
-    site('https://a.com.au/', ['sales@a.com.au', 'info@health.gov.au']),
-    site('https://b.com/', ['hi@b.com', 'x@b.de']),
-  ]);
+  const out = path.join(dir, 'results');
+  const layout = fileLayout('dealers', 'list', out);
+  const db = new Db(out);
+  const who = { cat: 'dealers', list: 'list', g: 1, run: 'test' };
+  db.sites.append(who, site('https://a.com.au/', ['sales@a.com.au', 'info@health.gov.au']));
+  db.sites.append(who, site('https://b.com/', ['hi@b.com', 'x@b.de']));
   const opts = { ...DEFAULT_OPTIONS, concurrency: 1, hostConcurrency: 1, revalidateDays: 30 };
-  return { dir, input, layout, opts };
+  return { dir, input, layout, opts, db, who, out };
 }
 
-test('processFile --summary-only with a filter: full CSV, filtered CSV, and a log block', async () => {
-  const { input, layout, opts } = setup();
+test('processFile --summary-only with a filter: full CSV, filtered CSV, and a history entry', async () => {
+  const { input, layout, opts, db } = setup();
   const filter = { include: [], exclude: ['gov.au', 'de'] };
-  await processFile(input, layout, { ...opts, filter }, null, true);
+  await processFile(db, input, layout, { ...opts, filter }, null, true);
   assert.deepEqual(readCsv(layout.outFile), ['sales@a.com.au', 'info@health.gov.au', 'hi@b.com', 'x@b.de']);
   const filtered = filteredPath(layout, filter);
   assert.equal(path.dirname(filtered), path.join(layout.emailsDir, 'filtered'));
   assert.deepEqual(readCsv(filtered), ['sales@a.com.au', 'hi@b.com']);
-  const log = fs.readFileSync(path.join(layout.logDir, 'list.log'), 'utf8');
+  const events: Record<string, string>[] = [];
+  db.runs.scan((e) => { if (e.t === 'filter.end') events.push(e as Record<string, string>); });
+  assert.equal(events.length, 1);
+  const log = events[0].text;
   assert.match(log, /filtered \(exclude \.de, \.gov\.au\)/);
   assert.match(log, /Emails {3}: 2 of 4 kept/);
   assert.match(log, /Dropped {2}: 2 \(/);
+  db.close();
 });
 
-test('filterFile writes only the filtered CSV from the cache, leaving the normal CSV alone', async () => {
-  const { input, layout, opts } = setup();
+test('filterFile writes only the filtered CSV from the stored results, leaving the normal CSV alone', async () => {
+  const { input, layout, opts, db, out } = setup();
   fs.mkdirSync(layout.emailsDir, { recursive: true });
   fs.writeFileSync(layout.outFile, 'name,email,website,link\nOld,old@a.com.au,https://a.com.au/,l\n');
   const filter = { include: ['au'], exclude: [] };
-  await filterFile(input, layout, { ...opts, filter });
+  await filterFile(db, input, layout, { ...opts, filter });
   assert.equal(fs.readFileSync(layout.outFile, 'utf8'), 'name,email,website,link\nOld,old@a.com.au,https://a.com.au/,l\n');
   assert.deepEqual(readCsv(filteredPath(layout, filter)), ['sales@a.com.au', 'info@health.gov.au']);
-  assert.ok(!fs.existsSync(cacheFiles(layout.cacheDir, 'list').lock), 'the list lock is released');
+  assert.ok(!fs.existsSync(db.listLockFile('dealers', 'list')), 'the list lock is released');
+  db.close();
+  assert.ok(out);
 });
 
-test('filterFile skips a list with no cache or an interrupted scrape', async () => {
-  const { input, layout, opts } = setup();
+test('filterFile skips a list with no stored results or an interrupted scrape', async () => {
+  const { input, layout, opts, db, who } = setup();
   const filter = { include: ['au'], exclude: [] };
-  fs.writeFileSync(cacheFiles(layout.cacheDir, 'list').marker, '');
-  await filterFile(input, layout, { ...opts, filter });
-  fs.rmSync(cacheFiles(layout.cacheDir, 'list').marker);
-  fs.rmSync(cacheFiles(layout.cacheDir, 'list').cache);
-  await filterFile(input, layout, { ...opts, filter });
-  assert.ok(!fs.existsSync(filteredPath(layout, filter)));
+  db.runs.append({ t: 'list.start', run: 'test', cat: 'dealers', list: 'list', g: 1 });
+  await filterFile(db, input, layout, { ...opts, filter });
+  assert.ok(!fs.existsSync(filteredPath(layout, filter)), 'interrupted');
+  db.runs.append({ t: 'list.end', run: 'test', cat: 'dealers', list: 'list', g: 1 });
+  db.sites.drop(who, 'https://a.com.au/');
+  db.sites.drop(who, 'https://b.com/');
+  await filterFile(db, input, layout, { ...opts, filter });
+  assert.ok(!fs.existsSync(filteredPath(layout, filter)), 'nothing stored');
+  db.close();
 });
 
 test('writeUnique with a filter also writes unique/<label>.<tag>.csv', () => {
@@ -133,16 +142,21 @@ test('writeUnique with a filter also writes unique/<label>.<tag>.csv', () => {
   put(b.outFile, 'name,email,website,link\nB,x@health.gov.au,https://b.com.au/,l\nC,help@b.de,https://b.com.au/,l\n');
   const target = path.join(a.uniqueDir, 'dealers.csv');
   const filter = { include: [], exclude: ['gov.au', 'de'] };
-  writeUnique([{ id: 'a', file: a.outFile }, { id: 'b', file: b.outFile }], 'dealers', target, a.logDir, filter);
+  const db = new Db(out);
+  writeUnique(db, [{ id: 'a', file: a.outFile }, { id: 'b', file: b.outFile }], 'dealers', target, 'dealers', filter);
   assert.deepEqual(readCsv(target), ['sales@a.com.au', 'x@health.gov.au', 'help@b.de']);
   assert.deepEqual(readCsv(path.join(a.uniqueDir, 'dealers.exclude-suffix-de-gov.au.csv')), ['sales@a.com.au']);
-  assert.match(fs.readFileSync(path.join(a.logDir, 'unique.dealers.log'), 'utf8'), /unique dealers filtered \(exclude \.de, \.gov\.au\)/);
+  const texts: string[] = [];
+  db.runs.scan((e) => { if (e.t === 'unique.end') texts.push(String(e.text)); });
+  assert.match(texts[0], /unique dealers filtered \(exclude \.de, \.gov\.au\)/);
+  db.close();
 });
 
 test('--dry-run names the filtered CSV', () => {
-  const { input, layout } = setup();
+  const { input, layout, db } = setup();
   const filter = { include: ['au'], exclude: [] };
-  const text = previewFile(input, layout, null, true, false, filter);
+  const text = previewFile(db, input, layout, null, true, false, filter);
   assert.match(text, /then would write the filtered CSV .*filtered.*list\.include-suffix-au\.csv/);
-  assert.doesNotMatch(previewFile(input, layout, null, true, false), /filtered CSV/);
+  assert.doesNotMatch(previewFile(db, input, layout, null, true, false), /filtered CSV/);
+  db.close();
 });

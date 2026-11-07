@@ -25,27 +25,27 @@ Crawl limits (defaults: deep crawl)
   --page-concurrency=N       page requests in parallel within one site (3)
   --host-concurrency=N       requests in parallel to one server, across all sites (3)
 
-Pages already scraped (kept per category in results/<category>/.cache/.pages; a page is never requested twice)
+Pages already scraped (kept in results/db/pages.jsonl for every category; a page is never requested twice)
   --revalidate[=DAYS]        ask again for stored pages older than DAYS days (30); with no number, for every stored page once
 
-Re-running and retrying (they reuse the cache and can be combined)
+Re-running and retrying (they reuse the stored results and can be combined)
   --force                    scrape every list again, even those with an output
-  --new-only                 keep the cache and scrape only the sites not cached yet (for a list that grew)
+  --new-only                 keep the stored results and scrape only the sites not stored yet (for a list that grew)
   --retry-failed             crawl again the sites that failed with no emails
   --retry-rate-limited       fetch the pages servers refused with HTTP 429/503
   --retry-budget-queued[=MIN]  continue sites that ran out of time, from their saved queue
   --retry-capped             continue sites that reached --max-pages (give a higher --max-pages)
 
 Outputs without crawling
-  --summary-only             rebuild CSVs and summaries from the cache with the current rules
-  --unique                   each email once per category -> results/<category>/emails/unique/<category>.csv
+  --summary-only             rebuild CSVs and summaries from the stored results with the current rules
+  --unique                   each email once per category -> results/emails/<category>/unique/<category>.csv
   --check-mx                 drop emails whose domain can't receive mail (DNS lookups only)
 
-Filtering outputs (by the ending of the email's domain; scraping, the cache and the normal CSV keep every email)
+Filtering outputs (by the ending of the email's domain; scraping, the stored results and the normal CSV keep every email)
   --include-suffix=.com,.au  also write a CSV with only the emails whose domain ends with one of these
   --exclude-suffix=.gov,.edu also write a CSV without the emails whose domain ends with one of these
                              (both together: included and not excluded; quote the [..] form: '--exclude-suffix[.gov,.de]')
-                             lists with an output already are not scraped again, only filtered from their cache
+                             lists with an output already are not scraped again, only filtered from their stored results
 
 Other
   --dry-run                  show what the command would do; writes nothing under results/
