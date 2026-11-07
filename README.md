@@ -199,6 +199,7 @@ results/emails/car-dealers-au/unique/car-dealers-au.exclude-suffix-de-edu-gov.cs
 | `npm run scrape -- --max-depth=N` | Cap the click levels followed from the start page (`0` = unlimited, the default) |
 | `npm run scrape -- --concurrency=N --page-concurrency=N --host-concurrency=N` | Websites crawled in parallel (12), page requests within one site (3), requests to one server across all sites (3) |
 | `npm run scrape -- --revalidate[=DAYS]` | Ask again about stored pages older than `DAYS` days (30); with no number, about every stored page once this run |
+| `npm run scrape -- --ignore-robot-disallow` | Crawl pages robots.txt Disallows anyway. A robots.txt that answers 5xx still keeps the site out, and the Crawl-delay still applies. With `--retry-failed`, also re-crawls the sites an earlier run recorded as `robots-disallowed`. See [Politeness and robots.txt](#politeness-and-robotstxt) |
 | `npm run scrape -- --quick` | Lighter, faster crawl (150 pages, 10 min per site). See [Crawl options](#crawl-options-depth-and-limits) |
 | `npm run scrape -- --log-level=debug` | Also write every failed request, timeout and robots decision to the root `logs/`. See [Diagnostic logs](#diagnostic-logs) |
 | `npm run typecheck` | Type-check the project with `tsc --noEmit` |
@@ -260,6 +261,7 @@ There is **no depth limit by default**. The crawler follows links as deep as the
 | `--page-concurrency=N` | Parallel page requests within one site (HTTP phase) | 3 | 3 |
 | `--host-concurrency=N` | Parallel requests to one server, across all sites | 3 | 3 |
 | `--revalidate[=DAYS]` | Pages already scraped in the category (see [Pages are scraped once](#pages-are-scraped-once-per-category)) are asked about again when older than `DAYS` days. With no number, every stored page is asked about once in this run | 30 days | 30 days |
+| `--ignore-robot-disallow` | Crawl pages robots.txt Disallows anyway. A robots.txt that answers 5xx still keeps the site out (`robots-unavailable`), and the `Crawl-delay` is still honoured. With `--retry-failed`, the sites an earlier run recorded as `robots-disallowed` are crawled again too (a re-crawled site keeps its earlier row; only new emails are added) | not set (robots.txt respected) | not set |
 | `--quick` | Preset: the lighter limits above (this was the default before deep crawl) | — | — |
 
 Numbers can be written as `--max-pages=600` or `--max-pages 600`. An explicit option always overrides the preset. For example, `--quick --max-pages=250` uses the quick limits but 250 pages.
@@ -375,7 +377,7 @@ A finished run can leave four kinds of unfinished work. Each has its own flag, a
 
 | Flag | Which sites | What it does |
 |---|---|---|
-| `--retry-failed` | Failed with no emails (`unreachable`, `timeout`, `browser-error`, `internal-error`) | Crawls them again from the start |
+| `--retry-failed` | Failed with no emails (`unreachable`, `timeout`, `browser-error`, `internal-error`) — and the `robots-disallowed` sites too, when the run also has `--ignore-robot-disallow` | Crawls them again from the start |
 | `--retry-rate-limited` | A server refused some pages with HTTP 429/503 even after one retry (the summary's `Limited` line) | Fetches only those pages, plus any new links found on them. Pages already fetched are not fetched again |
 | `--retry-budget-queued` | Ran out of time budget with pages still queued (the summary's `Out of time` line), or before the headless-browser phase could run | Continues the saved queue with the `--budget` budget per site, then runs the browser phase if it is still owed. Pages already fetched are not fetched again |
 | `--retry-capped --max-pages=N` | Reached the page cap (`--max-pages`) with pages still queued (the summary's `Capped` line) | Continues the saved queue up to the new cap `N`, which must be higher than the one they stopped at. Pages already fetched are not fetched again |
@@ -477,7 +479,7 @@ Failure reasons:
 | Reason | Meaning |
 |---|---|
 | `unreachable` | The site didn't respond on any start URL. The summary says why, from the first start URL: `dns` (the domain doesn't resolve; the browser isn't tried either), `refused`, `tls`, `timeout`, `reset`, `private` (it resolves to a private address), `redirects`, `http-<status>` (e.g. `http-403`, often a bot block), or `not-html` |
-| `robots-disallowed` | The site's `robots.txt` (on the host reached after redirects) forbids crawling it |
+| `robots-disallowed` | The site's `robots.txt` (on the host reached after redirects) forbids crawling it. No retry touches these by default; with `--ignore-robot-disallow` (and `--retry-failed`) they are crawled anyway |
 | `robots-unavailable` | The site's `robots.txt` answers with a server error (5xx), which the robots.txt standard treats as "keep out". This may be temporary, so `--retry-failed` tries these again |
 | `timeout` | The site exceeded the hard safety limit (the `--budget` plus 4 minutes; 24 minutes by default). It was stopped, and whatever it found by then is kept |
 | `browser-error` | The headless browser crashed or couldn't start on this site. Plain-HTTP results, if any, are kept. The details are in `logs/error-<date>.log` |
@@ -608,7 +610,7 @@ Pages under that path are fetched first, sitemap seeds are limited to that path,
 
 ### Politeness and robots.txt
 
-- **`robots.txt` is respected** for every page by the rules of that page's own host and protocol: the original domain, the host reached after a redirect, and the site's `www.`/bare-domain and `http:`/`https:` variants, each with its own `robots.txt`. Every redirect hop is checked before it is requested, and the browser fallback follows the same rules. If the landing page is disallowed, the site is reported as `robots-disallowed` and nothing is extracted. A `robots.txt` that answers with a server error (5xx, after one retry) counts as "disallow everything" and is reported as `robots-unavailable`.
+- **`robots.txt` is respected** for every page by the rules of that page's own host and protocol: the original domain, the host reached after a redirect, and the site's `www.`/bare-domain and `http:`/`https:` variants, each with its own `robots.txt`. Every redirect hop is checked before it is requested, and the browser fallback follows the same rules. If the landing page is disallowed, the site is reported as `robots-disallowed` and nothing is extracted. A `robots.txt` that answers with a server error (5xx, after one retry) counts as "disallow everything" and is reported as `robots-unavailable`. `--ignore-robot-disallow` relaxes this for one run: the `Disallow` rules are ignored, while a 5xx robots.txt and the `Crawl-delay` (next point) still apply.
 - **`Crawl-delay` is honoured** (capped at 10 seconds), as a minimum gap between requests to that server, by plain HTTP and the headless browser alike.
 - At most **3 requests at a time to any one server** across all sites being crawled, in both phases. This matters when many input domains redirect to the same server.
 - HTTP 429/503 responses and transient network errors are retried once, after the server's `Retry-After` (1–30 s) or 3 seconds. A page still refused is skipped and counted (see `Limited` in [Summary logs](#summary-logs)).

@@ -8,10 +8,11 @@ import { chromium } from 'playwright';
 import { page, startServer, type Route } from './helpers/server.js';
 import { untilAborted } from '../src/abort.js';
 import { makeBrowserFetcher } from '../src/browser.js';
-import { failedRetry } from '../src/cache.js';
+import { failedRetry, planRetries } from '../src/cache.js';
 import { closeBrowser, mergeResults, resumeSite, scrapeSite, type SiteResult } from '../src/crawler.js';
 import { hostGapMs, httpGet, resetHostPacing, setCrawlDelay } from '../src/http.js';
 import { PagesRepo } from '../src/db/pages-repo.js';
+import { setIgnoreRobotDisallow } from '../src/robots.js';
 
 after(() => closeBrowser());
 
@@ -68,6 +69,57 @@ test('robots.txt answering 5xx means keep out (RFC 9309), reported as robots-una
   } finally {
     await s.close();
   }
+});
+
+test('--ignore-robot-disallow crawls a site whose robots.txt Disallows everything, but a 5xx robots.txt still keeps us out', async () => {
+  const blocked = await startServer({
+    '/robots.txt': { type: 'text/plain', body: 'User-agent: *\nDisallow: /\n' },
+    '/': page('<a href="mailto:info@acme.co.nz">mail</a>'),
+  });
+  const errored = await startServer({
+    '/robots.txt': { status: 500, body: 'oops' },
+    '/': page('<a href="mailto:info@acme.co.nz">mail</a>'),
+  });
+  setIgnoreRobotDisallow(true);
+  try {
+    const r = await scrapeSite(blocked.url + '/', NO_BROWSER);
+    assert.equal(r.error, undefined);
+    assert.deepEqual(emailsOf(r), ['info@acme.co.nz']);
+    const e = await scrapeSite(errored.url + '/', NO_BROWSER);
+    assert.equal(e.error, 'robots-unavailable'); // a server error is not a Disallow decision
+    assert.ok(!errored.hits.includes('/'));
+  } finally {
+    setIgnoreRobotDisallow(false);
+    await blocked.close();
+    await errored.close();
+  }
+});
+
+test('--ignore-robot-disallow fetches pages a robots.txt path Disallows, and the Crawl-delay still applies', async () => {
+  const s = await startServer({
+    '/robots.txt': { type: 'text/plain', body: 'User-agent: *\nDisallow: /private\nCrawl-delay: 1\n' },
+    '/': page('<a href="mailto:info@acme.co.nz">mail</a><a href="/private/team">Team</a>'),
+    '/private/team': page('<p>craig.kirkland@acme.co.nz</p>'),
+  });
+  setIgnoreRobotDisallow(true);
+  try {
+    const r = await scrapeSite(s.url + '/', { ...NO_BROWSER, budgetMs: 120_000 });
+    assert.equal(r.error, undefined);
+    assert.deepEqual(emailsOf(r), ['craig.kirkland@acme.co.nz', 'info@acme.co.nz']);
+  } finally {
+    resetHostPacing();
+    setIgnoreRobotDisallow(false);
+    await s.close();
+  }
+});
+
+test('with --ignore-robot-disallow, --retry-failed also selects the robots-disallowed rows', () => {
+  const blocked: SiteResult = { v: 3, site: 'https://x.co.nz/', finalUrl: 'https://x.co.nz/', business: 'x', emails: [], pages: 0, usedBrowser: false, error: 'robots-disallowed' };
+  const dead: SiteResult = { ...blocked, site: 'https://y.co.nz/', finalUrl: 'https://y.co.nz/', error: 'unreachable' };
+  const plan = planRetries(new Map([[blocked.site, blocked], [dead.site, dead]]), { failed: true, rateLimited: false, budget: false });
+  assert.deepEqual([...plan.recrawl], ['https://y.co.nz/']); // default: robots blocks stay out
+  const ignoring = planRetries(new Map([[blocked.site, blocked], [dead.site, dead]]), { failed: true, rateLimited: false, budget: false, ignoreRobotDisallow: true });
+  assert.deepEqual([...ignoring.recrawl].sort(), ['https://x.co.nz/', 'https://y.co.nz/']);
 });
 
 test('a page redirecting off the site is not ingested (L5)', async () => {

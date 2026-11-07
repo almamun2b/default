@@ -51,6 +51,11 @@ test('parseArgs accepts --new-only and it takes no value', () => {
   assert.throws(() => parseArgs(['--new-only=1']), /takes no value/);
 });
 
+test('parseArgs accepts --ignore-robot-disallow and it takes no value', () => {
+  assert.ok(parseArgs(['--ignore-robot-disallow', 'x.csv']).flags.has('ignore-robot-disallow'));
+  assert.throws(() => parseArgs(['--ignore-robot-disallow=1']), /takes no value/);
+});
+
 test('parseArgs rejects values on boolean flags, fractions on counts, unknown flags (L1)', () => {
   assert.throws(() => parseArgs(['--force=false']), /takes no value/);
   assert.throws(() => parseArgs(['--quick=0']), /takes no value/);
@@ -163,11 +168,12 @@ test('ensureTrailingNewline keeps the next append on its own line', () => {
   for (const l of lines) JSON.parse(l);
 });
 
-test('retry predicates: failures, rate-limited pages and time-budget queues; never robots blocks (M10)', () => {
+test('retry predicates: failures, rate-limited pages and time-budget queues; robots blocks only under --ignore-robot-disallow (M10)', () => {
   const emails = [{ email: 'a@b.nz', name: null, link: 'x' }];
   const resume = (extra = {}) => ({ queued: [], limited: [], attempts: 5, ...extra });
   assert.equal(failedRetry(site('a', { error: 'unreachable' })), true);
   assert.equal(failedRetry(site('a', { error: 'robots-disallowed' })), false);
+  assert.equal(failedRetry(site('a', { error: 'robots-disallowed' }), true), true); // --retry-failed + --ignore-robot-disallow
   assert.equal(failedRetry(site('a', { error: 'timeout', emails })), false);
   assert.equal(failedRetry(site('a', { emails, rateLimited: 3 })), false); // rate limiting is its own retry now
   assert.equal(rateLimitedRetry(site('a', { emails, rateLimited: 3 })), true); // pre-v3 row: only a count
