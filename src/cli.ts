@@ -1,9 +1,9 @@
 import { parseSuffixes, type SuffixFilter } from './filter.js';
 
-export const BOOLEAN_FLAGS = ['force', 'retry-failed', 'retry-rate-limited', 'retry-capped', 'summary-only', 'new-only', 'quick', 'unique', 'dry-run', 'check-mx', 'help'];
+export const BOOLEAN_FLAGS = ['force', 'retry-failed', 'retry-rate-limited', 'retry-budget-queued', 'retry-capped', 'summary-only', 'new-only', 'quick', 'unique', 'dry-run', 'check-mx', 'help'];
 export const INTEGER_FLAGS = ['max-pages', 'browser-pages', 'max-depth', 'concurrency', 'page-concurrency', 'host-concurrency'];
 export const NUMBER_FLAGS = ['budget']; // minutes, may be fractional
-export const OPTIONAL_NUMBER_FLAGS = ['retry-budget-queued', 'revalidate']; // a flag that may carry a number (minutes, days): --x, --x=60 or --x 60
+export const OPTIONAL_NUMBER_FLAGS = ['revalidate']; // a flag that may carry a number (days): --x, --x=60 or --x 60
 /** Stored pages older than this many days are requested again (--revalidate=DAYS). */
 export const DEFAULT_REVALIDATE_DAYS = 30;
 export const RETRY_FLAGS = ['retry-failed', 'retry-rate-limited', 'retry-budget-queued', 'retry-capped'];
@@ -33,7 +33,7 @@ Re-running and retrying (they reuse the stored results and can be combined)
   --new-only                 keep the stored results and scrape only the sites not stored yet (for a list that grew)
   --retry-failed             crawl again the sites that failed with no emails
   --retry-rate-limited       fetch the pages servers refused with HTTP 429/503
-  --retry-budget-queued[=MIN]  continue sites that ran out of time, from their saved queue
+  --retry-budget-queued      continue sites that ran out of time, from their saved queue (per-site budget: --budget=MIN)
   --retry-capped             continue sites that reached --max-pages (give a higher --max-pages)
 
 Outputs without crawling
@@ -77,7 +77,11 @@ export function parseArgs(argv: string[]): ParsedArgs {
     const name = bracket ? bracket[1] : eq < 0 ? a.slice(2) : a.slice(2, eq);
     const inline = bracket ? bracket[2] : eq < 0 ? undefined : a.slice(eq + 1);
     if (BOOLEAN_FLAGS.includes(name)) {
-      if (inline !== undefined) throw new Error(`--${name} takes no value (got "--${name}=${inline}")`);
+      if (inline !== undefined) {
+        // retired value form (--retry-budget-queued=MIN); point at the one way left to set the budget
+        if (name === 'retry-budget-queued') throw new Error('--retry-budget-queued takes no value; set the per-site time budget with --budget=MIN');
+        throw new Error(`--${name} takes no value (got "--${name}=${inline}")`);
+      }
       flags.add(name);
     } else if (OPTIONAL_NUMBER_FLAGS.includes(name)) {
       flags.add(name);
@@ -119,19 +123,14 @@ export interface RetryOptions {
   rateLimited: boolean; // pages the server refused with 429/503: fetched again
   budget: boolean; // the queue left when the time budget ran out: continued
   capped: boolean; // the queue left at the page cap: continued up to a higher --max-pages
-  budgetMin?: number; // per-site budget for this run, from --retry-budget-queued=MIN
 }
 
-/** The retry flags of one run. `--retry-budget-queued=MIN` sets the budget, so it can't be combined with --budget. */
+/** The retry flags of one run; independent, so they combine. The per-site time budget comes only from --budget. */
 export function retryOptions({ flags, values }: ParsedArgs): RetryOptions {
-  const budgetMin = values.get('retry-budget-queued');
-  if (budgetMin !== undefined && values.has('budget')) {
-    throw new Error('--retry-budget-queued=MIN and --budget=MIN both set the time budget; give it once');
-  }
   if (flags.has('retry-capped') && !values.has('max-pages')) {
     throw new Error('--retry-capped continues sites that stopped at their page cap, so it needs a higher cap: add --max-pages=N (0 for no cap at all)');
   }
-  return { failed: flags.has('retry-failed'), rateLimited: flags.has('retry-rate-limited'), budget: flags.has('retry-budget-queued'), capped: flags.has('retry-capped'), budgetMin };
+  return { failed: flags.has('retry-failed'), rateLimited: flags.has('retry-rate-limited'), budget: flags.has('retry-budget-queued'), capped: flags.has('retry-capped') };
 }
 
 /** The --include-suffix / --exclude-suffix filter of this run, or null when neither is given. */

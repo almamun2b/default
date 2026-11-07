@@ -202,7 +202,7 @@ function summarize(layout: FileLayout, sites: string[], done: Map<string, SiteRe
     const queued = (r: SiteResult) => r.budgetQueued ?? r.resume?.queued.length ?? 0;
     const pages = outOfTime.reduce((n, r) => n + queued(r), 0);
     const worst = [...outOfTime].sort((a, b) => queued(b) - queued(a)).slice(0, 5).map((r) => `${host(r)} (${queued(r) || 'browser'})`);
-    lines.push(`  Out of time: ${outOfTime.length} site(s) ran out of time budget with ${pages} page(s) still queued: ${worst.join(', ')}; continue them with --retry-budget-queued=MIN`);
+    lines.push(`  Out of time: ${outOfTime.length} site(s) ran out of time budget with ${pages} page(s) still queued: ${worst.join(', ')}; continue them with --retry-budget-queued (per-site budget: --budget=MIN)`);
   }
   const capped = results.filter((r) => r.capQueued || r.resume?.capped);
   if (capped.length) {

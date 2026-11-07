@@ -130,7 +130,7 @@ function main(): void {
   if (marked && !write) console.log('Run again with --write to append them to the database.');
   if (marked && write) {
     console.log('Continue them with, for example:');
-    for (const id of toRetry) console.log(`  npm run scrape -- websites/${id}.csv --retry-budget-queued=60`);
+    for (const id of toRetry) console.log(`  npm run scrape -- websites/${id}.csv --retry-budget-queued --budget=60`);
   }
 }
 

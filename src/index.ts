@@ -63,7 +63,7 @@ async function main() {
     maxPages: values.get('max-pages') ?? base.maxPages,
     browserPages: values.get('browser-pages') ?? base.browserPages,
     maxDepth: values.get('max-depth') ?? base.maxDepth,
-    budgetMs: (retryOpts.budgetMin ?? values.get('budget') ?? base.budgetMs / 60_000) * 60_000,
+    budgetMs: (values.get('budget') ?? base.budgetMs / 60_000) * 60_000,
     concurrency: Math.max(1, values.get('concurrency') ?? 12),
     pageConcurrency: Math.max(1, values.get('page-concurrency') ?? base.pageConcurrency),
     hostConcurrency: Math.max(1, values.get('host-concurrency') ?? 3),

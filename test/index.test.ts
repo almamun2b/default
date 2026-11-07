@@ -61,26 +61,23 @@ test('parseArgs rejects values on boolean flags, fractions on counts, unknown fl
   assert.throws(() => parseArgs(['--frobnicate']), /Unknown option/);
 });
 
-test('--retry-budget-queued takes minutes as --x=N, --x N, or none; a file after it stays a file', () => {
+test('--retry-budget-queued is a plain flag; the retired =MIN / space forms fail loudly, pointing at --budget', () => {
   const alone = parseArgs(['--retry-budget-queued', 'websites/a.csv']);
   assert.ok(alone.flags.has('retry-budget-queued'));
-  assert.equal(alone.values.get('retry-budget-queued'), undefined);
   assert.deepEqual(alone.files, ['websites/a.csv']);
-  assert.equal(parseArgs(['--retry-budget-queued=60']).values.get('retry-budget-queued'), 60);
+  assert.throws(() => parseArgs(['--retry-budget-queued=60']), /set the per-site time budget with --budget=MIN/);
+  assert.throws(() => parseArgs(['--retry-budget-queued=abc']), /set the per-site time budget with --budget=MIN/);
   const spaced = parseArgs(['--retry-budget-queued', '7.5', 'a.csv']);
-  assert.equal(spaced.values.get('retry-budget-queued'), 7.5);
-  assert.deepEqual(spaced.files, ['a.csv']);
-  assert.throws(() => parseArgs(['--retry-budget-queued=0']), /minutes > 0/);
-  assert.throws(() => parseArgs(['--retry-budget-queued=abc']), /minutes > 0/);
+  assert.deepEqual(spaced.files, ['7.5', 'a.csv']); // no value is consumed, so the number is a file path and fails later
   assert.ok(parseArgs(['--retry-rate-limited']).flags.has('retry-rate-limited'));
   assert.throws(() => parseArgs(['--retry-rate-limited=1']), /takes no value/);
 });
 
-test('retryOptions: the three retries are independent, and the budget is given once', () => {
-  assert.deepEqual(retryOptions(parseArgs(['--retry-failed', '--retry-rate-limited'])), { failed: true, rateLimited: true, budget: false, capped: false, budgetMin: undefined });
-  assert.deepEqual(retryOptions(parseArgs(['--retry-budget-queued=45'])), { failed: false, rateLimited: false, budget: true, capped: false, budgetMin: 45 });
-  assert.equal(retryOptions(parseArgs(['--retry-budget-queued', '--budget=30'])).budgetMin, undefined);
-  assert.throws(() => retryOptions(parseArgs(['--retry-budget-queued=60', '--budget=30'])), /give it once/);
+test('retryOptions: the four retries are independent; the budget is only ever --budget', () => {
+  assert.deepEqual(retryOptions(parseArgs(['--retry-failed', '--retry-rate-limited'])), { failed: true, rateLimited: true, budget: false, capped: false });
+  assert.deepEqual(retryOptions(parseArgs(['--retry-budget-queued'])), { failed: false, rateLimited: false, budget: true, capped: false });
+  assert.deepEqual(retryOptions(parseArgs(['--retry-budget-queued', '--budget=30'])), { failed: false, rateLimited: false, budget: true, capped: false });
+  assert.deepEqual(retryOptions(parseArgs(['--retry-capped', '--max-pages=800'])), { failed: false, rateLimited: false, budget: false, capped: true });
 });
 
 test('--revalidate takes days as --x=N, --x N, or none; a file after it stays a file', () => {

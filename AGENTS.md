@@ -20,7 +20,7 @@ Standard procedure:
 6. Offer the retry that matches what the summary shows. They are separate flags, can be combined, reuse the stored results and keep everything else:
    - `Failures` (many `unreachable`/`timeout`, often transient): `--retry-failed` crawls those sites again from the start.
    - `Limited` (servers answered 429/503): `--retry-rate-limited` fetches only the refused pages (and new links on them), with the automatic per-server slow-down. If it stays large, add `--host-concurrency=1` or `--concurrency=6`.
-   - `Out of time` (sites ran out of budget with pages queued): `--retry-budget-queued=MIN` continues them from the saved queue without refetching anything. Suggest a budget that fits: sites with `Crawl-delay: 10` get only about 6 pages a minute.
+   - `Out of time` (sites ran out of budget with pages queued): `--retry-budget-queued --budget=MIN` continues them from the saved queue without refetching anything. Suggest a budget that fits: sites with `Crawl-delay: 10` get only about 6 pages a minute.
    - `Capped` (sites reached `--max-pages` with pages queued): only if the owner wants deeper coverage, `--retry-capped --max-pages=N` (N above the cap they stopped at) continues them. Contact-like pages are already fetched first, so this is rarely needed.
 
    Sites from runs before this feature have no saved queue. `npx tsx scripts/mark-budget-from-logs.ts` shows which ones the logs say ran out of time; with `--write` (ask the owner first, and only when no run is working on those files) it marks them so `--retry-budget-queued` re-crawls them. A re-crawled site keeps its earlier row exactly as it was; only new emails are added.
@@ -39,7 +39,7 @@ Standard procedure:
 | Scrape only the sites added to a list that was already scraped (stored results kept) | `npm run scrape -- --new-only websites/dealers/a.csv` |
 | Re-scrape only failed sites (no emails) | `npm run scrape -- --retry-failed` |
 | Fetch the pages servers refused with 429/503 | `npm run scrape -- --retry-rate-limited` |
-| Continue sites that ran out of time budget | `npm run scrape -- --retry-budget-queued=60` |
+| Continue sites that ran out of time budget | `npm run scrape -- --retry-budget-queued --budget=60` |
 | Continue sites that reached the page cap | `npm run scrape -- --retry-capped --max-pages=800` |
 | Ask again about stored pages older than N days (default 30); with no number, about every stored page once | `--revalidate=N` / `--revalidate` |
 | Show what a command would do, without running it | add `--dry-run` |

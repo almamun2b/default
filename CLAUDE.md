@@ -21,7 +21,7 @@ npm run scrape -- --force                        # re-scrape everything
 npm run scrape -- --new-only x.csv               # list grew: keep the stored results, scrape only sites not stored yet
 npm run scrape -- --retry-failed                 # re-crawl sites that failed with no emails, reuse the stored results for the rest
 npm run scrape -- --retry-rate-limited           # fetch only the pages servers refused with 429/503 (saved per site)
-npm run scrape -- --retry-budget-queued=60       # continue sites that ran out of time from their saved queue, 60 min each
+npm run scrape -- --retry-budget-queued --budget=60  # continue sites that ran out of time from their saved queue, 60 min each
 npm run scrape -- --retry-capped --max-pages=800 # continue sites that stopped at an explicit page cap, from their saved queue
 npm run scrape -- --revalidate=7                 # ask again about stored pages older than 7 days (default 30); no number = every stored page, once
 npm run scrape -- x.csv --dry-run                # what a command would do; writes nothing under results/
