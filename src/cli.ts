@@ -1,6 +1,6 @@
 import { parseSuffixes, type SuffixFilter } from './filter.js';
 
-export const BOOLEAN_FLAGS = ['force', 'retry-failed', 'retry-rate-limited', 'retry-budget-queued', 'retry-capped', 'summary-only', 'new-only', 'quick', 'unique', 'dry-run', 'check-mx', 'help'];
+export const BOOLEAN_FLAGS = ['force', 'retry-failed', 'retry-rate-limited', 'retry-budget-queued', 'retry-capped', 'summary-only', 'new-only', 'quick', 'unique', 'dry-run', 'check-mx', 'ignore-robot-disallow', 'help'];
 export const INTEGER_FLAGS = ['max-pages', 'browser-pages', 'max-depth', 'concurrency', 'page-concurrency', 'host-concurrency'];
 export const NUMBER_FLAGS = ['budget']; // minutes, may be fractional
 export const OPTIONAL_NUMBER_FLAGS = ['revalidate']; // a flag that may carry a number (days): --x, --x=60 or --x 60
@@ -27,6 +27,11 @@ Crawl limits (defaults: deep crawl)
 
 Pages already scraped (kept in results/db/pages.jsonl for every category; a page is never requested twice)
   --revalidate[=DAYS]        ask again for stored pages older than DAYS days (30); with no number, for every stored page once
+
+robots.txt (respected by default)
+  --ignore-robot-disallow    crawl pages robots.txt Disallows anyway; a robots.txt that answers 5xx and the
+                             Crawl-delay slowdown still apply; with --retry-failed, also re-crawls the sites
+                             an earlier run recorded as robots-disallowed
 
 Re-running and retrying (they reuse the stored results and can be combined)
   --force                    scrape every list again, even those with an output

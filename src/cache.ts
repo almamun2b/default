@@ -5,11 +5,12 @@ import type { ResumeParts, SiteResult } from './crawler.js';
  * business of src/db/; this file only decides, from a list's rows, what each --retry-* flag selects.
  */
 
-// None of the retries touches a robots.txt block: that won't change.
+// A robots.txt block is permanent, so no retry touches one — except --retry-failed under --ignore-robot-disallow.
 
-/** --retry-failed: a failure with nothing found. */
-export function failedRetry(r: SiteResult): boolean {
-  return !!r.error && r.error !== 'robots-disallowed' && r.emails.length === 0;
+/** --retry-failed: a failure with nothing found. With --ignore-robot-disallow, a robots.txt Disallow block counts too. */
+export function failedRetry(r: SiteResult, ignoreRobotDisallow = false): boolean {
+  if (r.error === 'robots-disallowed' && r.emails.length === 0) return ignoreRobotDisallow;
+  return !!r.error && r.emails.length === 0;
 }
 
 /** --retry-rate-limited: pages the server refused with 429/503. v3 rows list them; older rows only count them. */
@@ -35,6 +36,7 @@ export interface RetryFlags {
   rateLimited: boolean;
   budget: boolean;
   capped?: boolean;
+  ignoreRobotDisallow?: boolean; // --retry-failed also re-crawls sites stored as robots-disallowed
 }
 
 export interface RetryPlan {
@@ -51,7 +53,7 @@ export interface RetryPlan {
 export function planRetries(done: Map<string, SiteResult>, flags: RetryFlags): RetryPlan {
   const plan: RetryPlan = { recrawl: new Set(), resume: new Map(), previous: new Map() };
   for (const [site, r] of done) {
-    if (flags.failed && failedRetry(r)) {
+    if (flags.failed && failedRetry(r, flags.ignoreRobotDisallow)) {
       plan.recrawl.add(site);
       continue;
     }

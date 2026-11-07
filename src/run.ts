@@ -25,6 +25,7 @@ export interface RunOptions extends CrawlOptions {
   checkMx?: boolean; // drop emails whose domain can't receive mail (--check-mx)
   revalidateDays: number; // stored pages older than this are requested again (--revalidate); 0 = every one, once per run
   filter?: SuffixFilter; // --include-suffix / --exclude-suffix: also write a filtered CSV; scraping and the normal CSV are unaffected
+  ignoreRobotDisallow?: boolean; // crawl pages robots.txt Disallows (--ignore-robot-disallow)
 }
 
 /**
@@ -83,7 +84,7 @@ function reasonCode(error: string): string {
 
 /** Human-readable summary of one processed CSV; printed and recorded in the list's list.end event in results/db/run-history.jsonl. */
 export function describe(o: RunOptions): string {
-  return `${o.maxPages || 'unlimited'} pages, ${o.browserPages} browser pages, depth ${o.maxDepth || 'unlimited'}, ${o.budgetMs / 60_000} min/site, ${o.concurrency} sites in parallel, ${o.pageConcurrency} page requests per site, ${o.hostConcurrency} per server, stored pages revalidated after ${o.revalidateDays} days${o.checkMx ? ', MX check' : ''}`;
+  return `${o.maxPages || 'unlimited'} pages, ${o.browserPages} browser pages, depth ${o.maxDepth || 'unlimited'}, ${o.budgetMs / 60_000} min/site, ${o.concurrency} sites in parallel, ${o.pageConcurrency} page requests per site, ${o.hostConcurrency} per server, stored pages revalidated after ${o.revalidateDays} days${o.checkMx ? ', MX check' : ''}${o.ignoreRobotDisallow ? ', robots Disallow ignored' : ''}`;
 }
 
 const COLUMNS = ['name', 'email', 'website', 'link'];

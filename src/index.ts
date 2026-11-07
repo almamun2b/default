@@ -5,6 +5,7 @@ import { DEFAULT_REVALIDATE_DAYS, parseArgs, rawFlag, RETRY_FLAGS, retryOptions,
 import { ensureBrowser } from './browser.js';
 import { closeBrowser, DEFAULT_OPTIONS, QUICK_OPTIONS, setHostConcurrency } from './crawler.js';
 import { initFileLogging, installProcessHandlers, log, LOG_DIR, parseLevel, runId, withLogContext } from './logger.js';
+import { setIgnoreRobotDisallow } from './robots.js';
 import { categoryOf, fileLayout, findInputs, groupOf, IN_DIR, OUT_DIR, ROOT } from './paths.js';
 import { describeFilter } from './filter.js';
 import { LockedError } from './db/lock.js';
@@ -34,13 +35,15 @@ async function main() {
   const parsed = parseArgs(argv);
   const { flags, values, files: fileArgs } = parsed;
   const force = flags.has('force');
+  const ignoreRobotDisallow = flags.has('ignore-robot-disallow');
   const retryOpts = retryOptions(parsed);
-  const retry = retryOpts.failed || retryOpts.rateLimited || retryOpts.budget || retryOpts.capped ? retryOpts : null;
+  const retry = retryOpts.failed || retryOpts.rateLimited || retryOpts.budget || retryOpts.capped ? { ...retryOpts, ignoreRobotDisallow } : null;
   const summaryOnly = flags.has('summary-only'); // rebuild CSV + summary log from the cache, no scraping
   if (summaryOnly && retry) throw new Error(`--summary-only rebuilds outputs without crawling; it can't be used with --${RETRY_FLAGS.filter((f) => flags.has(f)).join(', --')}`);
   const newOnly = flags.has('new-only'); // keep the cache, scrape only the sites in the input that aren't in it
   if (newOnly && flags.has('force')) throw new Error("--new-only keeps the cache and --force scrapes everything again; use one");
   if (newOnly && summaryOnly) throw new Error("--summary-only rebuilds outputs without crawling; it can't be used with --new-only");
+  setIgnoreRobotDisallow(ignoreRobotDisallow); // before anything can crawl; --unique never crawls and was rejected above
   const dryRun = flags.has('dry-run');
   const filter = suffixFilter(parsed) ?? undefined; // outputs only: every email is still scraped and stored
   const store = (db = new Db(OUT_DIR, { readOnly: dryRun }));
@@ -50,7 +53,7 @@ async function main() {
   if (legacy.length && !dryRun) migrate(store);
   const beginRun = (options: unknown) => { if (!dryRun) store.runs.append({ type: 'run.start', run: runId, pid: process.pid, argv: process.argv.slice(2), options, node: process.version }); };
   if (flags.has('unique')) {
-    const other = ['force', 'new-only', ...RETRY_FLAGS, 'summary-only', 'quick', 'check-mx', 'revalidate', 'dry-run'].filter((f) => flags.has(f));
+    const other = ['force', 'new-only', ...RETRY_FLAGS, 'summary-only', 'quick', 'check-mx', 'revalidate', 'dry-run', 'ignore-robot-disallow'].filter((f) => flags.has(f));
     if (other.length) throw new Error(`--unique only combines existing outputs; it can't be used with --${other.join(', --')}`);
     beginRun({ filter });
     runUnique(store, fileArgs, filter);
@@ -70,11 +73,13 @@ async function main() {
     checkMx: flags.has('check-mx'),
     revalidateDays: flags.has('revalidate') ? values.get('revalidate') ?? 0 : DEFAULT_REVALIDATE_DAYS,
     filter,
+    ...(ignoreRobotDisallow ? { ignoreRobotDisallow: true } : {}),
   };
   setHostConcurrency(opts.hostConcurrency);
   beginRun(opts);
   log.info({ argv: process.argv.slice(2), options: opts, node: process.version, logDir: path.relative(ROOT, LOG_DIR) }, `Run ${runId} started (pid ${process.pid})`);
   if (!summaryOnly) log.info(`Crawl options: ${describe(opts)}`);
+  if (ignoreRobotDisallow && !summaryOnly) log.warn('robots.txt Disallow rules are ignored this run (--ignore-robot-disallow); a 5xx robots.txt and the Crawl-delay still apply');
   if (filter) log.info(`Filter: ${describeFilter(filter)} (applied to the outputs, from the stored results; scraping still collects every email)`);
   const files = fileArgs.map((f) => path.resolve(f));
   if (!files.length && !fs.existsSync(IN_DIR)) throw new Error(`No input files given and ${path.relative(ROOT, IN_DIR)}/ does not exist`);

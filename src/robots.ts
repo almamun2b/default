@@ -21,6 +21,14 @@ export const ROBOTS_UNAVAILABLE = 'robots-unavailable' as const;
 export type RobotsBlock = 'robots-disallowed' | 'robots-unavailable';
 export const blockReason = (robots: RobotsRules): RobotsBlock => (robots === ROBOTS_UNAVAILABLE ? 'robots-unavailable' : 'robots-disallowed');
 
+/**
+ * --ignore-robot-disallow: Disallow rules of the whole run are ignored (a 5xx robots.txt still keeps us out,
+ * and a Crawl-delay is still honoured). Run-level, because every checkpoint — landing page, queue, redirect
+ * hops, resume, the browser phase — reads the same rules here. Tests must reset it.
+ */
+let ignoreDisallow = false;
+export const setIgnoreRobotDisallow = (on: boolean): void => { ignoreDisallow = on; };
+
 const cache = new Map<string, Promise<RobotsRules>>();
 
 /** robots.txt for an origin, cached for the whole run. Also registers its Crawl-delay with the HTTP layer. */
@@ -59,6 +67,7 @@ async function fetchRobots(origin: string): Promise<RobotsRules> {
  */
 export function allowed(robots: RobotsRules, url: string): boolean {
   if (robots === ROBOTS_UNAVAILABLE) return false;
+  if (ignoreDisallow) return true;
   return robots?.isAllowed(url, UA) !== false;
 }
 
