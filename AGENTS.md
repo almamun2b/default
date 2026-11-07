@@ -34,7 +34,7 @@ Standard procedure:
 | Tests (no network needed) | `npm test` |
 | See what the current rules would change in existing outputs (writes nothing) | `npx tsx scripts/recheck-cache.ts` |
 | Scrape new input files | `npm run scrape` |
-| Scrape specific files (always re-scrapes) | `npm run scrape -- websites/dealers/a.csv` |
+| Scrape specific files (like a plain run: finished lists are skipped, interrupted ones resume; add `--force` to re-scrape) | `npm run scrape -- websites/dealers/a.csv` |
 | Re-scrape everything | `npm run scrape -- --force` |
 | Scrape only the sites added to a list that was already scraped (cache kept) | `npm run scrape -- --new-only websites/dealers/a.csv` |
 | Re-scrape only failed sites (no emails) | `npm run scrape -- --retry-failed` |

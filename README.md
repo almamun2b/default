@@ -179,7 +179,7 @@ results/car-dealers-au/emails/unique/car-dealers-au.exclude-suffix-de-edu-gov.cs
 | Command | What it does |
 |---|---|
 | `npm run scrape` | Scrape every list in `websites/` (and its category folders) that has no output in `results/` yet |
-| `npm run scrape -- websites/car-dealers-au/toyota.au.csv [more.csv …]` | Scrape specific files. This always re-scrapes, even if an output exists |
+| `npm run scrape -- websites/car-dealers-au/toyota.au.csv [more.csv …]` | Scrape specific files, like a plain run: lists with an output are skipped, interrupted ones resume. Add `--force` to scrape them again |
 | `npm run scrape -- --force` | Re-scrape all files in `websites/` from scratch |
 | `npm run scrape -- --new-only [websites/car-dealers-au/toyota.au.csv]` | For a list that was already scraped and then got more websites: keep the cache and crawl only the sites not in it, then rebuild the CSV and log from all of them. Without a file it covers every list under `websites/`. Not combinable with `--force` or `--summary-only` |
 | `npm run scrape -- --retry-failed` | Crawl again, from the start, only the sites that failed with no emails (unreachable, timeout, …). Everything else comes from the cache. Rebuilds the CSVs and logs. See [Retrying and continuing sites](#retrying-and-continuing-sites) |
@@ -446,7 +446,7 @@ Exclude a country's endings from the combined list, e.g. keep everything except 
 npm run scrape -- --unique websites/car-dealers-au/*.au.csv --exclude-suffix=.de
 ```
 
-Note that `npm run scrape -- websites/car-dealers-au/*.au.csv` always re-scrapes the files named. A plain `npm run scrape` would also pick up any list in `websites/` that has no output yet. Dealer sites are big, so expect roughly 1–2 hours per 150 sites with the default deep crawl. For a faster first pass, add `--quick`.
+Note that `npm run scrape -- websites/car-dealers-au/*.au.csv` treats the files named like a plain run: a list with an output is skipped and an interrupted one resumes; add `--force` to scrape a finished list again. A plain `npm run scrape` would also pick up any list in `websites/` that has no output yet. Dealer sites are big, so expect roughly 1–2 hours per 150 sites with the default deep crawl. For a faster first pass, add `--quick`.
 
 ## Summary logs
 
@@ -546,8 +546,8 @@ Files in `results/<category>/.cache/` for each input `<name>`:
 | `.pages` | Every page the category has fetched, shared by all its lists (see [Pages are scraped once](#pages-are-scraped-once-per-category)). Appended to, never rewritten, rotated or deleted. Holds personal data (emails), so it is readable by its owner only |
 | `.pages.lock` | Holds the PID of the run using the category's `.pages`; a second run on the category skips its files with an error |
 
-- **Interrupted runs resume automatically,** including interrupted `--force` and explicit-file re-scrapes. Run the same command again (or a plain `npm run scrape`) and cached sites are skipped.
-- **A fresh re-scrape keeps the old cache.** When a file with an existing output is scraped again (`--force` or an explicit file argument), its cache is renamed to `<name>.<timestamp>.jsonl` and a new one is started.
+- **Interrupted runs resume automatically,** including interrupted `--force` re-scrapes. Run the same command again (or a plain `npm run scrape`) and cached sites are skipped.
+- **A fresh re-scrape keeps the old cache.** When a file with an existing output is scraped again (`--force`), its cache is renamed to `<name>.<timestamp>.jsonl` and a new one is started.
 - **Outputs always use the current rules.** The CSV and summary re-apply the current email checks and name rules to every cached row, so after an update `--summary-only` cleans old outputs without re-scraping. The cache files themselves are never rewritten, except by a `--retry-*` run: it drops the failed sites with no emails it is about to redo (via an atomic rename), while rows it continues or re-crawls are kept until the retry's row supersedes them, so an interrupted retry loses nothing. `scripts/mark-budget-from-logs.ts --write` only appends.
 
 ## How it works

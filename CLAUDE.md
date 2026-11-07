@@ -14,7 +14,7 @@ npm run typecheck                                # tsc --noEmit over src/, test/
 npm test                                         # node:test suites, no network (local test server)
 npx tsx scripts/recheck-cache.ts                 # what the current rules would change in cached rows; writes nothing
 npm run scrape                                   # every list under websites/ (and websites/<category>/) without an output yet
-npm run scrape -- websites/dealers/x.csv         # specific file(s); always re-scrapes
+npm run scrape -- websites/dealers/x.csv         # specific file(s); like a plain run: skips finished lists, resumes interrupted ones; add --force to re-scrape
 npm run scrape -- --force                        # re-scrape everything
 npm run scrape -- --new-only x.csv               # list grew: keep the cache, scrape only sites not cached yet
 npm run scrape -- --retry-failed                 # re-crawl sites that failed with no emails, reuse cache for the rest

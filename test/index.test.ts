@@ -5,7 +5,7 @@ import { parse } from 'csv-parse/sync';
 import os from 'node:os';
 import path from 'node:path';
 import { acquireLock, beginScrape, budgetRetry, cacheFiles, cappedRetry, endScrape, ensureTrailingNewline, failedRetry, loadCache, LockedError, planRetries, rateLimitedRetry, writeCacheAtomic, writeFileAtomic } from '../src/cache.js';
-import { BOOLEAN_FLAGS, DEFAULT_REVALIDATE_DAYS, INTEGER_FLAGS, NUMBER_FLAGS, OPTIONAL_NUMBER_FLAGS, parseArgs, rawFlag, retryOptions, STRING_FLAGS, USAGE } from '../src/cli.js';
+import { BOOLEAN_FLAGS, DEFAULT_REVALIDATE_DAYS, INTEGER_FLAGS, NUMBER_FLAGS, OPTIONAL_NUMBER_FLAGS, parseArgs, rawFlag, retryOptions, skipReason, STRING_FLAGS, USAGE } from '../src/cli.js';
 import { setMxResolver, undeliverable } from '../src/mx.js';
 import type { SiteResult } from '../src/crawler.js';
 import { readSites } from '../src/input.js';
@@ -21,6 +21,18 @@ const site = (s: string, extra: Partial<SiteResult> = {}): SiteResult => ({
 });
 
 // ---------- CLI (L1) ----------
+
+test('skipReason: named files get the same treatment as a plain run', () => {
+  const base = { force: false, newOnly: false, retry: false, summaryOnly: false, hasOutput: false, interrupted: false };
+  assert.equal(skipReason({ ...base, hasOutput: true }), 'finished'); // finished list: its cache is never rotated away
+  assert.equal(skipReason({ ...base, hasOutput: true, force: true }), null);
+  assert.equal(skipReason({ ...base, hasOutput: true, newOnly: true }), null);
+  assert.equal(skipReason({ ...base, hasOutput: true, summaryOnly: true }), null);
+  assert.equal(skipReason({ ...base, hasOutput: true, retry: true }), null);
+  assert.equal(skipReason({ ...base, hasOutput: true, interrupted: true }), null); // resumes
+  assert.equal(skipReason(base), null); // never scraped: scrape it
+  assert.equal(skipReason({ ...base, retry: true }), 'no-output-to-retry');
+});
 
 test('parseArgs accepts valid flags in both forms', () => {
   const a = parseArgs(['--force', '--max-pages=10', '--budget', '2.5', '--log-level=debug', 'x.csv']);

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { LevelWithSilent } from 'pino';
 import { cacheFiles, LockedError } from './cache.js';
-import { DEFAULT_REVALIDATE_DAYS, parseArgs, rawFlag, RETRY_FLAGS, retryOptions, suffixFilter, USAGE } from './cli.js';
+import { DEFAULT_REVALIDATE_DAYS, parseArgs, rawFlag, RETRY_FLAGS, retryOptions, skipReason, suffixFilter, USAGE } from './cli.js';
 import { ensureBrowser } from './browser.js';
 import { closeBrowser, DEFAULT_OPTIONS, QUICK_OPTIONS, setHostConcurrency } from './crawler.js';
 import { initFileLogging, installProcessHandlers, log, LOG_DIR, parseLevel, runId, withLogContext } from './logger.js';
@@ -103,12 +103,12 @@ async function main() {
     if (!fs.existsSync(f)) { log.error({ input: f }, `Not found: ${f}`); failedFiles++; continue; }
     const interrupted = fs.existsSync(cacheFiles(layout.cacheDir, layout.base).marker);
     const hasOutput = fs.existsSync(layout.outFile);
-    if (!files.length && !force && !newOnly && !retry && !summaryOnly && hasOutput && !interrupted) {
+    const skip = skipReason({ force, newOnly, retry: !!retry, summaryOnly, hasOutput, interrupted });
+    if (skip === 'finished') {
       await skipOrFilter(f, layout, `Skipping ${path.relative(IN_DIR, f)} (output exists; use --force)`);
       continue;
     }
-    // A retry only redoes parts of finished scrapes; a list never scraped needs a normal run first.
-    if (!files.length && retry && !hasOutput) {
+    if (skip === 'no-output-to-retry') {
       await skipOrFilter(f, layout, `Skipping ${path.relative(IN_DIR, f)} (no output yet, so nothing to retry; scrape it first)`);
       continue;
     }

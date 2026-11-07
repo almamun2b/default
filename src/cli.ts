@@ -13,7 +13,7 @@ export const LIST_FLAGS = ['include-suffix', 'exclude-suffix']; // comma-separat
 export const USAGE = `Usage: npm run scrape -- [options] [websites/<category>/<list>.csv ...]
 
 With no files, scrapes every list under websites/ that has no output yet (and resumes interrupted ones).
-Named files are always scraped again, unless --new-only is given.
+Named files get the same treatment: lists with an output are skipped, interrupted ones resume. Add --force to scrape them again.
 
 Crawl limits (defaults: deep crawl)
   --quick                    lighter crawl: 150 pages, 30 browser pages, 10 min per site
@@ -142,6 +142,26 @@ export function suffixFilter({ lists }: ParsedArgs): SuffixFilter | null {
 }
 
 /** The raw value of one string flag, read before full validation (so logging can start first). */
+export interface ListState {
+  force: boolean;
+  newOnly: boolean;
+  retry: boolean;
+  summaryOnly: boolean;
+  hasOutput: boolean;
+  interrupted: boolean;
+}
+
+/**
+ * Whether a list is left alone this run. The same for named files and for a plain run, so a command that names
+ * lists resumes interrupted ones and never discards a finished cache unless --force is given.
+ */
+export function skipReason({ force, newOnly, retry, summaryOnly, hasOutput, interrupted }: ListState): 'finished' | 'no-output-to-retry' | null {
+  if (!force && !newOnly && !retry && !summaryOnly && hasOutput && !interrupted) return 'finished';
+  // A retry only redoes parts of finished scrapes; a list never scraped needs a normal run first.
+  if (retry && !hasOutput) return 'no-output-to-retry';
+  return null;
+}
+
 export function rawFlag(argv: string[], name: string): string | undefined {
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === `--${name}`) return argv[i + 1];
