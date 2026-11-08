@@ -274,6 +274,38 @@ When to change them:
 - **`--concurrency=6`:** a slow or unstable connection, or many sites on the same server.
 - **`--concurrency=24 --page-concurrency=4 --host-concurrency=4`:** a faster run on a good connection. Total requests in flight are at most `concurrency × page-concurrency`, and no single server gets more than `host-concurrency`. Raise the per-server number slowly: servers that see too many requests rate-limit or block.
 
+### Recommended settings
+
+Measured against this repo's stored results (2.2 M pages, ~197 k emails): about 98% of emails sit 4 clicks deep or shallower, and 99.99% of all fetched pages are within 7. Beyond depth 7 the crawler only walks product and blog catalogues (the deepest pages found are 12 levels down) and finds essentially nothing. These presets use that.
+
+**Large-site lists (car dealers, chains, directories) — the all-round recommendation:**
+
+```bash
+npm run scrape -- websites/<category>/<file>.csv --concurrency=10 --page-concurrency=3 --host-concurrency=3 --budget=60 --max-pages=2000 --max-depth=7
+```
+
+- `--max-depth=7` keeps everything the data says matters while cutting the bottomless catalogues that had one chain site crawl ~26,000 pages for no new emails.
+- `--max-pages=2000` stops any single runaway site; its queue is saved, and `--retry-capped --max-pages=N` can go deeper later if wanted.
+- `--budget=60` gives big sites a full hour. Small sites still finish on their own long before that.
+- `--page-concurrency=3 --host-concurrency=3` is the polite sweet spot: 3 requests within a site, and never more than 3 to one server even when many listed domains redirect to the same host.
+- `--concurrency=10` keeps ten sites moving at once — about 30 requests in flight in total, well within what a home connection handles.
+
+**Fast first pass over small business sites (clinics, dentists, shops):**
+
+```bash
+npm run scrape -- websites/<category>/<file>.csv --quick --max-depth=4
+```
+
+`--quick` (150 pages, 10 min per site) with depth 4 already covers ~98% of the emails small sites yield.
+
+**After any run — finish the leftovers** (stored results are reused, nothing already fetched is requested again):
+
+```bash
+npm run scrape -- --retry-failed --retry-rate-limited --retry-budget-queued --budget=60
+```
+
+As with any setting, start here and check the first file's summary: high `unreachable`, `Limited` or `timeout` counts mean the connection or the servers need gentler numbers (see [Is a high concurrency setting safe?](#is-a-high-concurrency-setting-safe)).
+
 ### Pages are scraped once
 
 Every page the scraper fetches is kept in `results/db/pages.jsonl`, shared by all the lists of **all categories** and by later runs, together with who fetched it (category, list, site, run). When any site reaches a page again, with the same emails and links it gave before, the page is **not requested again**: sites of one group domain, several domains redirecting to one server, a list that grew (`--new-only`), another category that lists the same business, or a re-run. Pages are told apart by URL (without tracking and session parameters, `www.`, a trailing slash or a `#fragment`) and by how they were fetched (plain HTTP, or the browser, which sees what HTTP can't, so the two never stand in for each other). A 404 is remembered too. The store has an index file (`pages.idx`), so opening it does not read the pages and finding one takes two reads, however many are stored.
