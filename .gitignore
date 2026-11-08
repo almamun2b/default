@@ -2,3 +2,9 @@ node_modules
 results
 # websites
 logs
+# secrets (HF_TOKEN)
+.env
+__pycache__
+# local Foursquare OS Places cache (parquet, scripts/fsq-places.py extract)
+data/
+

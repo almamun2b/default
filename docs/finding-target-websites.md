@@ -11,6 +11,7 @@ files themselves (names, numbering, what counts as a site) are in [AGENTS.md](..
 | 1 | **Overture Maps** (public parquet on S3) | `scripts/overture-places.py` | Bulk: thousands per country, most with a website | Free. ~8-15 min per country per query, needs `pip3 install --user duckdb` |
 | 2 | **OpenStreetMap**: Overpass API | `scripts/fetch-osm-places.ts` | Fewer sites, good local coverage | Free; public servers time out or refuse (retry later, it resumes) |
 | 2b | OpenStreetMap: Geofabrik extract | `scripts/pbf-places.py` | Same data as 2, no Overpass needed | Download a `.pbf`, needs `pip install osmium` |
+| 2c | **Foursquare OS Places** (free, gated parquet on Hugging Face) | `scripts/fsq-places.py` | Similar bulk to Overture, its own place database; consumer venues (food, shops) strong, trades weaker; also has an `email` field (not used yet, see below) | Free (HF account + accept the dataset once, `HF_TOKEN`). `extract` reads the whole table remotely once (~20–40 min, several countries in one scan) into `data/fsq/`; every later `query` is local and takes seconds |
 | 3 | **Web search** by name + suburb for places with no website | [finding-target-websites-by-web-search.md](finding-target-websites-by-web-search.md) | ~15 % of searches give a site | Token-expensive, 200 searches per turn. Last resort for gaps |
 | 4 | Google Places API | none yet | Best coverage | Needs an API key from the owner |
 
@@ -39,6 +40,15 @@ Work in a scratch folder (`/tmp/cand`), never in `websites/` until the last step
    ```bash
    npx tsx scripts/fetch-osm-places.ts au /tmp/cand/tyres-osm.au.csv --match='shop=tyres'
    npx tsx scripts/fetch-osm-places.ts ca /tmp/cand/dentists-osm.ca.csv --match='amenity=dentist' --bbox=41.6,-141,83.2,-52
+   ```
+   Foursquare OS Places is another bulk pull, in two steps. `extract` copies the countries you name into the local,
+   git-ignored `data/fsq/` cache (once per release, needs `HF_TOKEN`: accept the dataset once on Hugging Face, then put a
+   read token in `.env`); `list-categories` and `query` then read only that cache (seconds, no token, no network) with the
+   same flags as the Overture script (`--category`, `--name`, `--bbox`, `--include-no-website`):
+   ```bash
+   python3 scripts/fsq-places.py extract AU,NZ
+   python3 scripts/fsq-places.py list-categories AU tyre
+   python3 scripts/fsq-places.py query au /tmp/cand/fsq-tyres.au.csv --category='tire|tyre'
    ```
    `au` and `nz` have built-in areas; for another country pass any label plus `--bbox` (OSM wants south,west,north,east;
    Overture wants west,south,east,north).
@@ -90,3 +100,20 @@ Work in a scratch folder (`/tmp/cand`), never in `websites/` until the last step
 |---|---|---|---|---|
 | 2026-11-03 | cafes, mechanics, tyre shops | AU, NZ | `cafes.<cc>`, `mechanics-2.<cc>`, `tyre-shops.<cc>` | OpenStreetMap |
 | 2026-11-05 | same | AU, NZ | numbered `-2` files and `*-chains` lists | Overture Maps (release 2026-10-21.0): one broad pull per country with `--category='cafe|coffee|tire|automotive|...'`, then split by the `category` column |
+
+## Later: Foursquare emails (not implemented)
+
+Owner decision: for now Foursquare is only a source of website lists. Its `email` field ("primary contact email address, if
+available") is sparse, and the `extract` cache already keeps `email`, `tel` and `fsq_place_id`, so a later change needs no
+new remote scan. `python3 scripts/fsq-places.py extract` prints how many places per country have a website and an email.
+
+What a later implementation would hit (checked 2026-11-08):
+- Nothing in the scraper imports emails that were not found by crawling. `readSites()` (`src/input.ts`) ignores every column
+  except the website and the name, and `Found.source` (`src/extract.ts`) has no value for an external source.
+- Least invasive route: carry an optional `email` column through the list, read it in `readSites()`, and inject it between
+  `checkedResults` and `assignRows` in `src/run.ts` with `source: 'fsq'`. It then goes through `cleanEmail`, `--check-mx`
+  and the dedupe like a crawled email, with no database schema change. A seed inside `scrapeSite` would also survive
+  `--retry-*` runs and is stored in `sites.jsonl`, but needs plumbing through `runSite`, `scrapeSite` and `resumeSite`.
+  Places with an email but no website would need their own `name,email,website,link` output.
+- Access: Foursquare now delivers OS Places through its Places Portal (Iceberg catalog + access token) and the old public S3
+  bucket is gone; Hugging Face is the second route (the one used here). The Iceberg route may scan faster.
