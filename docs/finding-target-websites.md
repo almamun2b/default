@@ -11,7 +11,7 @@ files themselves (names, numbering, what counts as a site) are in [AGENTS.md](..
 | 1 | **Overture Maps** (public parquet on S3) | `scripts/overture-places.py` | Bulk: thousands per country, most with a website | Free. ~8-15 min per country per query, needs `pip3 install --user duckdb` |
 | 2 | **OpenStreetMap**: Overpass API | `scripts/fetch-osm-places.ts` | Fewer sites, good local coverage | Free; public servers time out or refuse (retry later, it resumes) |
 | 2b | OpenStreetMap: Geofabrik extract | `scripts/pbf-places.py` | Same data as 2, no Overpass needed | Download a `.pbf`, needs `pip install osmium` |
-| 3 | **Web search** by name + suburb for places with no website | [finding-websites-by-web-search.md](finding-websites-by-web-search.md) | ~15 % of searches give a site | Token-expensive, 200 searches per turn. Last resort for gaps |
+| 3 | **Web search** by name + suburb for places with no website | [finding-target-websites-by-web-search.md](finding-target-websites-by-web-search.md) | ~15 % of searches give a site | Token-expensive, 200 searches per turn. Last resort for gaps |
 | 4 | Google Places API | none yet | Best coverage | Needs an API key from the owner |
 
 Not used: paid data sets, and scraping Yellow Pages, Yelp or TripAdvisor (terms).
@@ -89,4 +89,4 @@ Work in a scratch folder (`/tmp/cand`), never in `websites/` until the last step
 | Date | Topic | Country | Files | Sources |
 |---|---|---|---|---|
 | 2026-11-03 | cafes, mechanics, tyre shops | AU, NZ | `cafes.<cc>`, `mechanics-2.<cc>`, `tyre-shops.<cc>` | OpenStreetMap |
-| 2026-11-05 | same | AU, NZ | numbered `-2` files and `*-chains` lists (counts in TODO.md "Open items") | Overture Maps (release 2026-10-21.0): one broad pull per country with `--category='cafe|coffee|tire|automotive|...'`, then split by the `category` column |
+| 2026-11-05 | same | AU, NZ | numbered `-2` files and `*-chains` lists | Overture Maps (release 2026-10-21.0): one broad pull per country with `--category='cafe|coffee|tire|automotive|...'`, then split by the `category` column |
