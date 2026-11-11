@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import * as cheerio from 'cheerio';
 import type { CheerioAPI } from 'cheerio';
 import { parse as parseDomain } from 'tldts';
+import { isKnownWord, loadList, nameFromLabel, readLines } from './words.js';
 
 /** Where an email was found, roughly most to least reliable. Emails seen only in raw HTML are often junk. */
 export type EmailSource = 'jsonld' | 'microdata' | 'mailto' | 'cfemail' | 'data-attr' | 'text' | 'raw';
@@ -187,8 +188,8 @@ const LOCAL_STOP = /^(group|team|line|desk|admin|office|centre|center|health|cli
  * Department, role and business vocabulary. A local part using any of these isn't a person, and a scraped
  * "name" made only of them ("Customer Care", "Parts Department") isn't either.
  */
-const DEPT_WORDS = new Set([
-  ...GENERIC_LOCAL, ...NOT_NAME_WORDS,
+export const DEPT_WORDS = new Set([
+  ...GENERIC_LOCAL, ...NOT_NAME_WORDS, ...loadList('role-words.txt'),
   'parts', 'part', 'cars', 'car', 'customer', 'customers', 'relations', 'experience', 'trade', 'res', 'events', 'event',
   'travel', 'press', 'fleet', 'store', 'yard', 'shop', 'department', 'dept', 'room', 'print', 'body', 'spare',
   'used', 'demo', 'insurance', 'leasing', 'lease', 'rental', 'rentals', 'hire', 'tours', 'tour', 'tickets', 'ticket',
@@ -206,22 +207,94 @@ const DEPT_WORDS = new Set([
   'studies', 'technologies', 'packaging', 'testing', 'programmes', 'programs', 'authorities', 'visa', 'residences',
 ]);
 
-const GIVEN_NAMES = new Set(
-  fs.readFileSync(new URL('./data/given-names.txt', import.meta.url), 'utf8').split('\n').map((s) => s.trim()).filter(Boolean),
-);
+const GIVEN_NAMES = loadList('given-names.txt');
+const PLACE_WORDS = loadList('place-words.txt'); // places that are also given names: "sydney@" isn't a person
+const FREE_MAIL = loadList('free-mail-domains.txt');
+const PLACES = loadList('places.txt'); // suburbs, localities and towns of AU and NZ (single words)
+const SURNAME_RANK = new Map(readLines('surnames.txt').map((w, i) => [w.toLowerCase(), i + 1])); // US Census surnames in rank order
+const COMMON_SURNAME = 20000;
+
+/** Whether a domain is a free or ISP mailbox provider (gmail.com, bigpond.net.au …), not a business's own. */
+export const isFreeMail = (domain: string): boolean => FREE_MAIL.has(domain.toLowerCase());
 
 const titleCase = (parts: string[]) => parts.map((p) => p[0].toUpperCase() + p.slice(1)).join(' ');
 const localParts = (local: string) => local.split(/[._-]+/).filter(Boolean);
 
-/** "jane.smith" → "Jane Smith", only when the first part is a known given name and nothing reads as a department. */
-export function nameFromLocal(local: string): string | null {
+const TWO_LETTER_NOT_SURNAME = new Set(['it', 'hr', 'pr', 'my', 'me', 'we', 'go', 'so', 'us', 'uk', 'au', 'nz', 'sa', 'wa', 'nt', 'ac', 'ca', 'ok', 'up', 'on', 'in', 'at', 'to', 'by', 'an', 'as', 'is', 'no', 'he', 'be', 'ai']);
+
+/** Whether `word` (a lone local part) looks like it came from the email's own domain: "preston@prestonmazda.com.au". */
+function echoesDomain(word: string, domain: string): boolean {
+  return domain.toLowerCase().split('.').some((label) => {
+    const l = label.replace(/[^a-z]/g, '');
+    return l === word || (word.length >= 4 && (l.startsWith(word) || l.endsWith(word)));
+  });
+}
+
+/**
+ * A lone local part that is a given name and a surname run together ("julieweller" → "Julie Weller") or an initial
+ * and a common surname ("jsmith" → "J Smith"). Not when it is a place, a known word or echoes the email's domain.
+ */
+function joinedName(p: string, domain = ''): string | null {
+  if (!/^[a-z]{6,20}$/.test(p) || PLACES.has(p) || isKnownWord(p) || echoesDomain(p, domain)) return null;
+  for (let i = Math.min(p.length - 3, 10); i >= 3; i--) {
+    const rank = SURNAME_RANK.get(p.slice(i));
+    if (rank !== undefined && rank <= COMMON_SURNAME && GIVEN_NAMES.has(p.slice(0, i))) return titleCase([p.slice(0, i), p.slice(i)]);
+  }
+  const rank = SURNAME_RANK.get(p.slice(1));
+  return rank !== undefined && rank <= COMMON_SURNAME && p.length >= 5 ? `${p[0].toUpperCase()} ${titleCase([p.slice(1)])}` : null;
+}
+
+/**
+ * "jane.smith" → "Jane Smith", "paul.wu" → "Paul Wu", "rachel.b" → "Rachel B", "johnh" → "John H", "alex" → "Alex".
+ * The first part must be a known given name and nothing may read as a department, a role or (for a lone word) a
+ * place or the email's own domain.
+ */
+export function nameFromLocal(local: string, domain = ''): string | null {
   if (isGenericLocal(local)) return null;
   const parts = localParts(local);
-  if (parts.length < 2 || parts.length > 3) return null;
-  if (!parts.every((p) => /^[a-z']{3,12}$/.test(p) && /[aeiouy]/.test(p))) return null;
-  if (!GIVEN_NAMES.has(parts[0])) return null;
+  if (parts.length < 1 || parts.length > 3) return null;
   if (parts.some((p) => DEPT_WORDS.has(p) || LOCAL_STOP.test(p))) return null;
-  return titleCase(parts);
+  const word = (p: string) => /^[a-z']{3,12}$/.test(p) && /[aeiouy]/.test(p);
+  if (parts.length === 1) {
+    const [p] = parts;
+    if (PLACE_WORDS.has(p) || echoesDomain(p, domain)) return null;
+    if (!word(p)) return joinedName(p, domain);
+    if (GIVEN_NAMES.has(p)) return titleCase(parts);
+    const m = /^([a-z]{3,11})([b-df-hj-np-tv-z])$/.exec(p); // "johnh", "adamr": first name and the surname's initial
+    if (m && GIVEN_NAMES.has(m[1])) return `${titleCase([m[1]])} ${m[2].toUpperCase()}`;
+    return joinedName(p, domain);
+  }
+  const [first, ...rest] = parts;
+  if (!word(first) || !GIVEN_NAMES.has(first)) return null;
+  const surnameOk = (p: string) => p.length === 1 ? /^[a-z]$/.test(p)
+    : p.length === 2 ? /[aeiouy]/.test(p) && !TWO_LETTER_NOT_SURNAME.has(p) : word(p);
+  return rest.every(surnameOk) ? titleCase(parts) : null;
+}
+
+export type LocalKind = 'junk' | 'generic' | 'role' | 'person' | 'words';
+
+// Mailboxes that say nothing about who or what is behind them; every other generic one names a function (sales, careers).
+const BARE_LOCAL = new Set(['info', 'contact', 'contactus', 'hello', 'hi', 'mail', 'email', 'enquiries', 'enquiry', 'enquire', 'inquiries', 'inquiry', 'general',
+  'office', 'admin', 'administrator', 'reception', 'receptionist', 'reception1', 'frontdesk', 'welcome', 'team', 'web', 'website', 'webmaster', 'queries']);
+
+/**
+ * What the part of an email before the "@" says: nothing (`junk`: "0zbi", "279942079"), a mailbox that names no function
+ * (`generic`: info, admin), a function (`role`: sales, "Customer Service"), a person ("Paul Wu", "John H") or other words
+ * (a branch, place or department: "Geebung", "Customer Relations"). `text` is the words as a name part.
+ */
+export function localName(local: string, domain = ''): { kind: LocalKind; text: string | null } {
+  const l = local.toLowerCase();
+  if (isGenericLocal(l)) {
+    const flat = l.replace(/[._-]/g, '');
+    return BARE_LOCAL.has(l) || BARE_LOCAL.has(flat) ? { kind: 'generic', text: null } : { kind: 'role', text: nameFromLabel(l).slice(0, 40) };
+  }
+  const letters = l.replace(/[^a-z]/g, '');
+  if (letters.length < 3 || !/[aeiouy]/.test(letters) || (/\d/.test(l) && letters.length <= 4)) return { kind: 'junk', text: null };
+  const noDigits = l.replace(/\d+/g, ' ').trim();
+  const person = nameFromLocal(noDigits.replace(/\s+/g, ''), domain);
+  if (person) return { kind: 'person', text: person };
+  const text = nameFromLabel(noDigits.replace(/[^a-z]+/g, ' ').trim()).slice(0, 40).trim();
+  return text ? { kind: 'words', text } : { kind: 'junk', text: null };
 }
 
 /** Lowercase ASCII letters of a name word, accents and macrons folded ("Tāne" → "tane"). */
@@ -233,22 +306,36 @@ const allDeptWords = (name: string) => {
 };
 
 /**
- * A scraped heading/link text only counts as a person if it is consistent with the email or carries a title.
- * Compares whole tokens of the local part, never substrings ("care" in "gmsvcare" is not a match).
+ * Whether a name matches the email's local part by whole words ("Sarah Connor" ↔ sarah@, connor.s@, sconnor@),
+ * never by substring. Role words don't count: "Vice President" is not president@.
  */
-function consistentPerson(name: string | null, email: string): string | null {
-  if (!name || allDeptWords(name)) return null;
-  const local = email.split('@')[0].toLowerCase();
-  const tokens = local.split(/[^a-z]+/).filter(Boolean);
+function matchesEmail(name: string, email: string): boolean {
+  const tokens = email.split('@')[0].toLowerCase().split(/[^a-z]+/).filter(Boolean);
   const words = name.replace(TITLE_RE, '').split(' ').map(fold).filter(Boolean);
-  if (words.some((w) => w.length >= 3 && tokens.includes(w))) return name;
+  if (words.some((w) => w.length >= 3 && !DEPT_WORDS.has(w) && tokens.includes(w))) return true;
   if (words.length >= 2) {
     const first = words[0], last = words[words.length - 1];
     const forms = new Set([first + last, first[0] + last, first + last[0], last + first, last + first[0]]);
-    if ([...tokens, tokens.join('')].some((t) => forms.has(t))) return name;
+    if ([...tokens, tokens.join('')].some((t) => forms.has(t))) return true;
   }
-  if (TITLE_RE.test(name) && !isGenericLocal(email.split('@')[0])) return name;
-  return null;
+  return false;
+}
+
+/**
+ * A scraped heading/link text only counts as a person if it is consistent with the email or carries a title.
+ * A title alone is not enough for a role mailbox (bishop@, vicar.general@) or another person's first name.
+ */
+function consistentPerson(name: string | null, email: string): string | null {
+  if (!name || allDeptWords(name)) return null;
+  if (matchesEmail(name, email)) return name;
+  if (!TITLE_RE.test(name)) return null;
+  const local = email.split('@')[0].toLowerCase();
+  if (isGenericLocal(local)) return null;
+  const tokens = local.split(/[^a-z]+/).filter(Boolean);
+  if (tokens.some((t) => DEPT_WORDS.has(t) || LOCAL_STOP.test(t))) return null;
+  const words = name.replace(TITLE_RE, '').split(' ').map(fold).filter(Boolean);
+  if (tokens.length && GIVEN_NAMES.has(tokens[0]) && !words.includes(tokens[0])) return null;
+  return name;
 }
 
 // ---------- JSON-LD ----------
@@ -275,15 +362,46 @@ const ldType = (n: any) => ([] as string[]).concat(n['@type'] ?? []).join(' ');
 
 const GENERIC_NAME = /^(home|home ?page|welcome|untitled|index|default|website|my blog|just another .*)$/i;
 
+// Bot-check, error, parked and placeholder pages: their title is the page's, not the business's.
+const NOT_A_NAME =
+  /^(just a moment|one moment|please wait|checking your browser|attention required|access denied|forbidden|403|404|50\d|not found|page not found|error|server error|bad gateway|service unavailable|coming soon|under construction|maintenance|index of|default (web )?page|welcome to nginx|apache2|test page|account suspended|suspended|this domain|domain (for sale|name for sale|is for sale|expired|parked)|buy this domain|parked|robot check|are you a human|security check|loading|redirecting|new page)\b/i;
+
+const TITLE_SPLIT = /\s+[|–—•·:»›~]\s+|\s+-\s+/;
+
 /**
- * A business name tidied for output: a leading "Welcome to", an address after a comma ("…, 1/123 Main Road") and
- * generic segments ("Home | Acme") removed. Null when nothing usable is left.
+ * A business name tidied for output: a leading "Welcome to", an address after a comma ("…, 1/123 Main Road"), a
+ * trailing phone number and generic or bot-check segments ("Home | Acme", "Just a moment...") removed. Null
+ * when nothing usable is left, or the text is a URL.
  */
 export function tidyBusinessName(raw: string): string | null {
-  const segs = raw.replace(/\s+/g, ' ').trim().split(/\s+[|–—•·:]\s+|\s+-\s+/);
-  const kept = segs.map((s) => s.replace(/^welcome to\s+/i, '').replace(/,\s*\d.*$/, '').trim()).filter((s) => s && !GENERIC_NAME.test(s));
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw.trim())) return null;
+  const segs = raw.replace(/\s+/g, ' ').trim().split(TITLE_SPLIT);
+  const kept = segs
+    .map((s) => s.replace(/^welcome to\s+/i, '').replace(/,\s*\d.*$/, '').replace(/\b(call|phone|ph|tel|telephone)\b[:.\s]*[\d +()-]{6,}.*$/i, '').trim())
+    .map((s) => (s.length > 60 && s.includes(': ') ? s.split(': ')[0].trim() : s)) // "Acme: Prices, Service, Dealers, Test Drives"
+    .filter((s) => s && !GENERIC_NAME.test(s) && !NOT_A_NAME.test(s));
   const v = kept.join(' | ');
   return v.length >= 2 && v.length <= 80 ? v : null;
+}
+
+/** A logo image's alt text ("Acme Dental logo" → "Acme Dental"). */
+function logoName($: CheerioAPI): string | null {
+  const imgs = $('img[alt]').filter((_, el) => /logo/i.test(`${$(el).attr('class') ?? ''} ${$(el).attr('id') ?? ''} ${$(el).attr('src') ?? ''}`)).slice(0, 5);
+  for (const el of imgs.get()) {
+    const alt = ($(el).attr('alt') ?? '').replace(/\b(logo|home ?page|homepage|image|icon|brand|link)\b/gi, ' ').replace(/\s+/g, ' ').replace(/^[\s\-–|:]+|[\s\-–|:]+$/g, '');
+    const v = alt.length >= 2 && alt.length <= 60 ? tidyBusinessName(alt) : null;
+    if (v) return v;
+  }
+  return null;
+}
+
+/** The name in a footer's "© 2024 Acme Dental Ltd. All rights reserved". */
+function copyrightName($: CheerioAPI): string | null {
+  const text = ($('footer').first().text() || $('[class*="copyright" i],[id*="copyright" i]').first().text()).replace(/\s+/g, ' ');
+  const m = /(?:©|\(c\)|copyright(?:\s*©)?)\s*(?:\d{4}(?:\s*[-–]\s*\d{4})?)?\s*[,.:|–-]?\s*([^|.©\n]{3,60})/i.exec(text);
+  if (!m) return null;
+  const name = m[1].replace(/\ball rights.*$/i, '').replace(/\s*[,.]?\s*\b(pty\.?\s*ltd|pty|limited|ltd|inc|llc)\b\.?\s*$/i, '').trim();
+  return name.length >= 3 ? tidyBusinessName(name) : null;
 }
 
 export function businessName(html: string, host: string): string {
@@ -307,16 +425,18 @@ export function businessName(html: string, host: string): string {
   }
 
   const title = clean($('title').first().text());
-  if (title) {
-    const segs = title.split(/\s+[|–—•·:]\s+|\s+-\s+|\s*\|\s*/).map(clean).filter(Boolean);
-    const domainKey = baseKey(host);
-    // short segments ("NZ", "Home") would match almost any domain
-    const match = segs.find((s) => baseKey(s).length >= 4 && (baseKey(s).includes(domainKey) || domainKey.includes(baseKey(s))));
-    const generic = /^(home|welcome|homepage|contact|about)/i;
-    const pick = match ?? segs.filter((s) => !generic.test(s)).sort((a, b) => a.length - b.length)[0];
-    const v = pick && tidyBusinessName(pick);
-    if (v) return v;
-  }
+  const segs = title ? title.split(/\s+[|–—•·:»›~]\s+|\s+-\s+|\s*\|\s*/).map(clean).filter(Boolean) : [];
+  const domainKey = baseKey(host);
+  // short segments ("NZ", "Home") would match almost any domain
+  const match = segs.find((s) => baseKey(s).length >= 4 && (baseKey(s).includes(domainKey) || domainKey.includes(baseKey(s))));
+  const viaMatch = match && tidyBusinessName(match);
+  if (viaMatch) return viaMatch;
+  const viaPage = logoName($) ?? copyrightName($);
+  if (viaPage) return viaPage;
+  const generic = /^(home|welcome|homepage|contact|about)/i;
+  const pick = segs.filter((s) => !generic.test(s)).sort((a, b) => a.length - b.length)[0];
+  const v = pick && tidyBusinessName(pick);
+  if (v) return v;
   return host.replace(/^www\./, '');
 }
 
@@ -403,17 +523,25 @@ export function extractFromDom($: CheerioAPI, html: string): Found[] {
     else if (prev.name === null && name) prev.name = name;
   };
 
-  // 1. schema.org / JSON-LD emails with names
+  // 1. schema.org / JSON-LD and microdata emails. A Person's name goes only to that Person's own addresses
+  // (several allowed), never to the other emails on the page.
+  const splitEmails = (raw: unknown): string[] =>
+    ([] as unknown[]).concat(raw ?? []).filter((v): v is string => typeof v === 'string')
+      .flatMap((v) => v.split(/[;,\s]+/)).map((v) => v.replace(/^mailto:/i, '').split('?')[0]).filter(Boolean);
   walkJsonLd($, (n) => {
-    if (typeof n.email !== 'string') return;
+    const emails = splitEmails(n.email);
+    if (!emails.length) return;
     const nm = /Person|Physician|Dentist/i.test(ldType(n)) ? personName(n.name) : null;
-    add(n.email.replace(/^mailto:/i, ''), nm, 'jsonld');
+    for (const e of emails) add(e, nm, 'jsonld');
   });
   $('[itemtype*="schema.org/Person" i]').each((_, el) => {
-    const em = $(el).find('[itemprop="email"]').first();
-    const raw = em.attr('content') || em.attr('href')?.replace(/^mailto:/i, '') || em.text();
-    const nm = personName($(el).find('[itemprop="name"]').first().text());
-    if (raw) add(raw, nm, 'microdata');
+    // only the properties of this item, not those of an item nested inside it
+    const own = (sel: string) => $(el).find(sel).filter((__, x) => $(x).closest('[itemscope]').get(0) === el);
+    const nm = personName(own('[itemprop="name"]').first().text());
+    own('[itemprop="email"]').each((__, em) => {
+      const e = $(em);
+      for (const raw of splitEmails(e.attr('content') || e.attr('href') || e.text())) add(raw, nm, 'microdata');
+    });
   });
 
   // 2. mailto: links
@@ -475,7 +603,8 @@ export function extractFromDom($: CheerioAPI, html: string): Found[] {
   // derive person name from local part when nothing better was found
   const out: Found[] = [];
   for (const [email, { name, source }] of found) {
-    const fromLocal = name ? null : nameFromLocal(email.split('@')[0]);
+    const [local, domain] = email.split('@');
+    const fromLocal = name ? null : nameFromLocal(local, domain);
     out.push({ email, name: name ?? fromLocal, source, ...(name ? { nameFrom: 'page' } : fromLocal ? { nameFrom: 'local' } : {}) });
   }
   return out;
@@ -500,6 +629,8 @@ function localDerived(row: Found): boolean {
   return oldShape && row.name === titleCase(parts);
 }
 
+const PAGE_NEAR_SOURCES = new Set<string>(['mailto', 'cfemail', 'text']);
+
 /**
  * Re-applies the current email and name rules to a stored row, so old cache lines can be cleaned without
  * re-scraping. Returns null when the email no longer passes. A scraped name is only dropped when it is all
@@ -508,11 +639,12 @@ function localDerived(row: Found): boolean {
 export function recheckRow<T extends Found>(row: T): T | null {
   const email = cleanEmail(row.email);
   if (!email) return null;
-  const local = email.split('@')[0];
+  const [local, domain] = email.split('@');
   let name = row.name;
   if (name && (localDerived(row) || allDeptWords(name))) name = null;
-  if (email !== row.email && name && !consistentPerson(name, email)) name = null;
-  const fromLocal = name ? null : nameFromLocal(local);
+  // a name read off the page next to the email must still match it (JSON-LD and microdata name the exact address)
+  if (name && (email !== row.email || PAGE_NEAR_SOURCES.has(row.source ?? 'raw')) && !consistentPerson(name, email)) name = null;
+  const fromLocal = name ? null : nameFromLocal(local, domain);
   const out: T = { ...row, email, name: name ?? fromLocal };
   if (name) out.nameFrom = row.nameFrom ?? 'page';
   else if (fromLocal) out.nameFrom = 'local';
@@ -539,6 +671,31 @@ export function demoteRolePrefixes(rows: Found[], min = 5): void {
     if ((variants.get(localParts(r.email.split('@')[0])[0])?.size ?? 0) >= min) {
       r.name = null;
       delete r.nameFrom;
+    }
+  }
+}
+
+/**
+ * One page-read name on several different emails of a site ("Mr Matt Baxter" on bishop@, matt.baxter@ and
+ * vicar.general@) belongs only to the emails that match it. The others lose it and fall back to their own
+ * local part. Names read from an exact JSON-LD or microdata address are left alone. Edits `rows` in place.
+ */
+export function demoteSharedPageNames(rows: Found[]): void {
+  const byName = new Map<string, Found[]>();
+  for (const r of rows) {
+    if (!r.name || localDerived(r) || r.source === 'jsonld' || r.source === 'microdata') continue;
+    const list = byName.get(r.name) ?? [];
+    list.push(r);
+    byName.set(r.name, list);
+  }
+  for (const list of byName.values()) {
+    if (list.length < 2) continue;
+    for (const r of list) {
+      if (matchesEmail(r.name!, r.email)) continue;
+      const [local, domain] = r.email.split('@');
+      r.name = nameFromLocal(local, domain);
+      if (r.name) r.nameFrom = 'local';
+      else delete r.nameFrom;
     }
   }
 }

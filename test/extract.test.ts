@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { businessName, cleanEmail, demoteRolePrefixes, extractFromHtml, findEmails, nameFromLocal, personName, recheckRow, tidyBusinessName, type Found } from '../src/extract.js';
+import { businessName, cleanEmail, demoteRolePrefixes, demoteSharedPageNames, extractFromHtml, findEmails, localName, nameFromLocal, personName, recheckRow, tidyBusinessName, type Found } from '../src/extract.js';
 
 const byEmail = (html: string) => Object.fromEntries(extractFromHtml(html).map((f) => [f.email, f.name]));
 
@@ -217,4 +217,99 @@ test('business names drop "Home", "Welcome to" and trailing addresses (D3)', () 
   assert.equal(tidyBusinessName('Welcome to DW Family Doctors, 1/123 Pakuranga Road, Pakuranga, Auckland'), 'DW Family Doctors');
   assert.equal(businessName('<meta property="og:site_name" content="Home"><title>Acme Dental | Home</title>', 'acmedental.co.nz'), 'Acme Dental');
   assert.equal(businessName('<title>Home</title>', 'www.acme.co.nz'), 'acme.co.nz');
+});
+
+// ---------- name rules (2026-11-11 audit: the same name on many unrelated emails) ----------
+
+test('localName: junk, role mailboxes, people and other words', () => {
+  const k = (l: string, d = 'acme.com.au') => localName(l, d);
+  assert.equal(k('0zbi').kind, 'junk');
+  assert.equal(k('279942079').kind, 'junk');
+  assert.equal(k('bss').kind, 'junk'); // no vowel
+  assert.equal(k('info').kind, 'generic');
+  assert.equal(k('admin').kind, 'generic');
+  assert.deepEqual(k('sales'), { kind: 'role', text: 'Sales' });
+  assert.deepEqual(k('customer.service'), { kind: 'role', text: 'Customer Service' });
+  assert.deepEqual(k('customerservice'), { kind: 'role', text: 'Customer Service' });
+  assert.deepEqual(k('paul.wu'), { kind: 'person', text: 'Paul Wu' });
+  assert.deepEqual(k('rachel.b'), { kind: 'person', text: 'Rachel B' });
+  assert.deepEqual(k('vicki.j.cunningham'), { kind: 'person', text: 'Vicki J Cunningham' });
+  assert.deepEqual(k('johnh'), { kind: 'person', text: 'John H' });
+  assert.deepEqual(k('alex'), { kind: 'person', text: 'Alex' });
+  assert.deepEqual(k('jane.smith7'), { kind: 'person', text: 'Jane Smith' });
+  assert.deepEqual(k('geebung'), { kind: 'words', text: 'Geebung' });
+  assert.deepEqual(k('customer.relations'), { kind: 'words', text: 'Customer Relations' });
+  assert.deepEqual(k('meredithwilson67', 'gmail.com'), { kind: 'person', text: 'Meredith Wilson' }); // a given name and a surname run together
+  assert.deepEqual(k('jsmith'), { kind: 'person', text: 'J Smith' });
+  assert.deepEqual(k('lynfieldfitness'), { kind: 'words', text: 'Lynfield Fitness' });
+  assert.deepEqual(k('thomastown'), { kind: 'words', text: 'Thomastown' }); // a suburb, not Thomas Town
+  assert.deepEqual(k('senator.smith'), { kind: 'words', text: 'Senator Smith' }); // a role word, not a first name
+});
+
+test('a lone given name is a person unless it is a place or echoes the email domain', () => {
+  assert.equal(nameFromLocal('preston', 'prestonmazda.com.au'), null);
+  assert.equal(nameFromLocal('preston', 'x.com.au'), null); // a suburb as well
+  assert.equal(nameFromLocal('sydney', 'x.com.au'), null);
+  assert.equal(nameFromLocal('alex', 'austyrenautomotive.com.au'), 'Alex');
+  assert.equal(nameFromLocal('mark.au', 'x.com.au'), null);
+  assert.equal(nameFromLocal('tom.it', 'x.com.au'), null);
+});
+
+test('a title alone does not tie a name to a role mailbox or another person (P1, P2)', () => {
+  const near = (name: string, email: string) => byEmail(`<div class="card"><h3>${name}</h3><p>${email}</p></div>`)[email];
+  assert.equal(near('Mr Matt Baxter', 'bishop@dow.org.au'), null);
+  assert.equal(near('Mr Matt Baxter', 'vicar.general@dow.org.au'), null);
+  assert.equal(near('Dr Amy Wong', 'john@x.co.nz'), 'John'); // not Amy: the heading is someone else's, the name comes from the address
+  assert.equal(near('Mr Michael Crandon', 'coomera@parliament.qld.gov.au'), 'Mr Michael Crandon'); // an electorate mailbox
+  assert.equal(near('Vice President', 'president@club.org.au'), null); // role words don't match
+  assert.equal(near('Mr Matt Baxter', 'matt.baxter@dow.org.au'), 'Mr Matt Baxter');
+});
+
+test('recheckRow drops an old page name that no longer matches its email (P1)', () => {
+  assert.equal(recheckRow({ email: 'bishop@dow.org.au', name: 'Mr Matt Baxter', source: 'mailto', nameFrom: 'page' })!.name, null);
+  assert.equal(recheckRow({ email: 'bishop@dow.org.au', name: 'Mr Matt Baxter', source: 'jsonld', nameFrom: 'page' })!.name, 'Mr Matt Baxter');
+});
+
+test('one page name on several emails stays only on those that match it (P3)', () => {
+  const rows: Found[] = [
+    { email: 'bishop@dow.org.au', name: 'Mr Matt Baxter', source: 'mailto', nameFrom: 'page' },
+    { email: 'matt.baxter@dow.org.au', name: 'Mr Matt Baxter', source: 'mailto', nameFrom: 'page' },
+    { email: 'cwilkins@a.co.nz', name: 'Chris Wilkins', source: 'mailto', nameFrom: 'page' },
+    { email: 'cwilkins@b.co.nz', name: 'Chris Wilkins', source: 'mailto', nameFrom: 'page' },
+    { email: 'who@x.nz', name: 'Solo Person', source: 'mailto', nameFrom: 'page' },
+  ];
+  demoteSharedPageNames(rows);
+  assert.deepEqual(rows.map((r) => r.name), [null, 'Mr Matt Baxter', 'Chris Wilkins', 'Chris Wilkins', 'Solo Person']);
+});
+
+test('a JSON-LD Person names only its own emails, an array included', () => {
+  const html = `<script type="application/ld+json">{"@type":"Person","name":"Aroha Smith","email":["aroha@x.nz","mailto:a.smith@x.nz"]}</script>
+    <p>info@x.nz bob@x.nz</p><a href="mailto:bob@x.nz">Bob Jones</a>
+    <script type="application/ld+json">{"@type":"Organization","name":"X Ltd","email":"office@x.nz"}</script>`;
+  assert.deepEqual(byEmail(html), { 'aroha@x.nz': 'Aroha Smith', 'a.smith@x.nz': 'Aroha Smith', 'info@x.nz': null, 'bob@x.nz': 'Bob Jones', 'office@x.nz': null });
+});
+
+test('a microdata Person names all its own emails and nothing inside a nested item', () => {
+  const html = `<div itemscope itemtype="https://schema.org/Person"><span itemprop="name">Jo Bloggs</span>
+      <a itemprop="email" href="mailto:jo@x.nz">jo@x.nz</a> <span itemprop="email">jo.bloggs@x.nz</span>
+      <div itemscope itemtype="https://schema.org/Organization"><span itemprop="name">Acme Ltd</span><span itemprop="email">sales@acme.nz</span></div></div>
+    <p>other@x.nz</p>`;
+  assert.deepEqual(byEmail(html), { 'jo@x.nz': 'Jo Bloggs', 'jo.bloggs@x.nz': 'Jo Bloggs', 'sales@acme.nz': null, 'other@x.nz': null });
+});
+
+test('business names skip bot-check titles, URLs, phone numbers and SEO tails', () => {
+  assert.equal(tidyBusinessName('Just a moment...'), null);
+  assert.equal(tidyBusinessName('One moment, please...'), null);
+  assert.equal(tidyBusinessName('Access Denied'), null);
+  assert.equal(tidyBusinessName('https://www.jackowheels.net.au/'), null);
+  assert.equal(tidyBusinessName('Home » Joseph Radiators and Air Conditioning'), 'Joseph Radiators and Air Conditioning');
+  assert.equal(tidyBusinessName('Muay Thai Melbourne Call 0433 568 256'), 'Muay Thai Melbourne');
+  assert.equal(tidyBusinessName('New Cars Toyota Australia: Prices, Service Centres, Dealers, Test Drives'), 'New Cars Toyota Australia');
+  assert.equal(businessName('<title>Just a moment...</title>', 'www.acme.co.nz'), 'acme.co.nz');
+});
+
+test('business name falls back to the logo text, then the footer copyright', () => {
+  assert.equal(businessName('<title>Contact</title><header><img class="site-logo" src="/l.png" alt="Bay Motors logo"></header>', 'x.nz'), 'Bay Motors');
+  assert.equal(businessName('<title>Contact</title><footer>© 2024 Bay Motors Pty Ltd. All rights reserved.</footer>', 'x.nz'), 'Bay Motors');
+  assert.equal(businessName('<title>Bay Motors | Contact</title><footer>© 2024 Other Name</footer>', 'baymotors.nz'), 'Bay Motors'); // a domain match wins
 });

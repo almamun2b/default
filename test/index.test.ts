@@ -241,7 +241,7 @@ test('assignRows: input order, unique by email, name fallback, formula-safe', ()
     ["'=evil()", 'x@a.nz', 'https://a.nz/', 'l1'],
     ['Cardiology', 'y@b.nz', 'https://b.nz/', 'l3'],
   ]);
-  assert.deepEqual(out.kinds, { person: 0, department: 1, input: 0, business: 1 });
+  assert.deepEqual(out.kinds, { person: 0, department: 1, input: 0, business: 1, mailbox: 0, domain: 0 });
 });
 
 test('assignRows credits an email to the site that owns its domain, not the first one listing it (B4)', () => {
@@ -254,8 +254,8 @@ test('assignRows credits an email to the site that owns its domain, not the firs
     [sites[1], site(sites[1], { business: 'BYD Castle Hill', emails: [{ email: 'sales@bydcastlehill.com.au', name: null, link: 'c1', source: 'mailto' }] })],
   ]);
   assert.deepEqual(assignRows(sites, done).rows, [
-    ['BYD Haberfield', 'sales@bydhaberfield.com.au', sites[0], 'h2'],
-    ['BYD Castle Hill', 'sales@bydcastlehill.com.au', sites[1], 'c1'],
+    ['BYD Haberfield - Sales', 'sales@bydhaberfield.com.au', sites[0], 'h2'],
+    ['BYD Castle Hill - Sales', 'sales@bydcastlehill.com.au', sites[1], 'c1'],
   ]);
 });
 
@@ -271,16 +271,16 @@ test('assignRows prefers a site where the email was not only in raw HTML (B4)', 
 test('assignRows keeps an email found on many sites that none of them owns in the main rows, credited to the first', () => {
   const dealer = (host: string) => site(`https://${host}/`, { business: host, emails: [
     { email: 'enquiries@oaic.gov.au', name: null, link: `https://${host}/privacy` },
-    { email: `sales@${host}`, name: null, link: `https://${host}/` },
+    { email: `info@${host}`, name: null, link: `https://${host}/` },
   ] });
-  const sites = ['https://a.com.au/', 'https://b.com.au/', 'https://c.com.au/'];
+  const sites = ['https://alphamotors.com.au/', 'https://betamotors.com.au/', 'https://gammamotors.com.au/'];
   const done = new Map(sites.map((s) => [s, dealer(new URL(s).hostname)]));
   const out = assignRows(sites, done);
   assert.deepEqual(out.rows, [
-    ['a.com.au', 'enquiries@oaic.gov.au', 'https://a.com.au/', 'https://a.com.au/privacy'],
-    ['a.com.au', 'sales@a.com.au', 'https://a.com.au/', 'https://a.com.au/'],
-    ['b.com.au', 'sales@b.com.au', 'https://b.com.au/', 'https://b.com.au/'],
-    ['c.com.au', 'sales@c.com.au', 'https://c.com.au/', 'https://c.com.au/'],
+    ['Oaic', 'enquiries@oaic.gov.au', 'https://alphamotors.com.au/', 'https://alphamotors.com.au/privacy'], // another company's address is named by its own domain, as words
+    ['Alpha Motors', 'info@alphamotors.com.au', 'https://alphamotors.com.au/', 'https://alphamotors.com.au/'],
+    ['Beta Motors', 'info@betamotors.com.au', 'https://betamotors.com.au/', 'https://betamotors.com.au/'],
+    ['Gamma Motors', 'info@gammamotors.com.au', 'https://gammamotors.com.au/', 'https://gammamotors.com.au/'],
   ]);
   assert.ok(!('shared' in out));
 });
@@ -293,7 +293,7 @@ test("assignRows uses the input's own name before the scraped business name, aft
   ]);
   const out = assignRows(sites, done, new Map([[sites[0], 'St Mary’s Church'], [sites[1], 'B Clinic']]));
   assert.deepEqual(out.rows.map((r) => r[0]), ['St Mary’s Church', 'Jo Bloggs', 'Cardiology']);
-  assert.deepEqual(out.kinds, { person: 1, department: 1, input: 1, business: 0 });
+  assert.deepEqual(out.kinds, { person: 1, department: 1, input: 1, business: 0, mailbox: 0, domain: 0 });
 });
 
 test('recheckSite tidies cached business names and drops generic department titles (D3)', () => {
@@ -430,7 +430,7 @@ test('processFile --summary-only: credited rows, input names and failure details
   await processFile(db, input, layout, opts, null, true);
   const rows = parse(fs.readFileSync(layout.outFile, 'utf8'), { columns: true }) as Record<string, string>[];
   assert.deepEqual(rows.map((r) => [r.name, r.email]), [
-    ['Alpha Motors', 'complaints@myfordfinance.com.au'], ['Alpha Motors', 'sales@a.com.au'], ['Beta Motors', 'sales@b.com.au'], ['Gamma Motors', 'sales@c.com.au'],
+    ['Myfordfinance - Complaints', 'complaints@myfordfinance.com.au'], ['Alpha Motors - Sales', 'sales@a.com.au'], ['Beta Motors - Sales', 'sales@b.com.au'], ['Gamma Motors - Sales', 'sales@c.com.au'],
   ]);
   assert.deepEqual(fs.readdirSync(out).sort(), ['db', 'emails'], 'only the database and the output tree, no cache or log folders');
   const end = [] as Record<string, any>[];
@@ -438,10 +438,31 @@ test('processFile --summary-only: credited rows, input names and failure details
   assert.equal(end.length, 1);
   assert.equal(end[0].list, 'list');
   assert.equal(end[0].counts.uniqueEmails, 4);
-  assert.match(end[0].text, /4 unique \(0 person name, 0 department page title, 4 input name, 0 business name\)/);
+  assert.match(end[0].text, /4 unique \(0 person name, 0 department page title, 4 business \+ mailbox, 0 input name, 0 business name, 0 email domain\)/);
   assert.doesNotMatch(end[0].text, /Shared/);
   assert.match(end[0].text, /Failures : unreachable=1 \(dns=1\)/);
   assert.match(end[0].text, /dead\.com\.au \[unreachable: dns\]/);
+  db.close();
+});
+
+test('--summary-only skips an interrupted list unless --include-interrupted, which rebuilds it and leaves it interrupted', async () => {
+  const dir = tmp();
+  const input = path.join(dir, 'list.csv');
+  fs.writeFileSync(input, 'name,website\nAlpha Motors,a.com.au\n');
+  const out = path.join(dir, 'results');
+  const layout = fileLayout('dealers', 'list', out);
+  const db = new Db(out);
+  const begun = db.beginList({ cat: 'dealers', list: 'list', run: 'r1', mode: 'scrape', sites: 1, outputExists: false, keep: false });
+  db.sites.append(begun, site('https://a.com.au/', { business: 'Home', emails: [{ email: 'sales@a.com.au', name: null, link: 'https://a.com.au/contact' }] }));
+  assert.ok(db.runs.interrupted('dealers', 'list'));
+  const opts = { ...DEFAULT_OPTIONS, concurrency: 1, hostConcurrency: 1, revalidateDays: 30 };
+  await processFile(db, input, layout, opts, null, true);
+  assert.equal(fs.existsSync(layout.outFile), false, 'skipped');
+  await processFile(db, input, layout, opts, null, true, false, true);
+  const rows = parse(fs.readFileSync(layout.outFile, 'utf8'), { columns: true }) as Record<string, string>[];
+  assert.deepEqual(rows.map((r) => [r.name, r.email]), [['Alpha Motors - Sales', 'sales@a.com.au']]);
+  assert.ok(db.runs.interrupted('dealers', 'list'), 'still resumable');
+  assert.ok(parseArgs(['--summary-only', '--include-interrupted']).flags.has('include-interrupted'));
   db.close();
 });
 

@@ -1,6 +1,6 @@
 import { parseSuffixes, type SuffixFilter } from './filter.js';
 
-export const BOOLEAN_FLAGS = ['force', 'retry-failed', 'retry-rate-limited', 'retry-budget-queued', 'retry-capped', 'summary-only', 'new-only', 'quick', 'unique', 'dry-run', 'check-mx', 'ignore-robot-disallow', 'help'];
+export const BOOLEAN_FLAGS = ['force', 'retry-failed', 'retry-rate-limited', 'retry-budget-queued', 'retry-capped', 'summary-only', 'include-interrupted', 'new-only', 'quick', 'unique', 'dry-run', 'check-mx', 'ignore-robot-disallow', 'help'];
 export const INTEGER_FLAGS = ['max-pages', 'browser-pages', 'max-depth', 'concurrency', 'page-concurrency', 'host-concurrency'];
 export const NUMBER_FLAGS = ['budget']; // minutes, may be fractional
 export const OPTIONAL_NUMBER_FLAGS = ['revalidate']; // a flag that may carry a number (days): --x, --x=60 or --x 60
@@ -43,6 +43,7 @@ Re-running and retrying (they reuse the stored results and can be combined)
 
 Outputs without crawling
   --summary-only             rebuild CSVs and summaries from the stored results with the current rules
+  --include-interrupted      with --summary-only: also rebuild lists whose scrape never finished, from what is stored so far (they stay marked unfinished, so a later scrape still resumes them)
   --unique                   each email once per category -> results/emails/<category>/unique/<category>.csv
   --check-mx                 drop emails whose domain can't receive mail (DNS lookups only)
 
