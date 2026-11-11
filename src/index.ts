@@ -40,6 +40,8 @@ async function main() {
   const retry = retryOpts.failed || retryOpts.rateLimited || retryOpts.budget || retryOpts.capped ? { ...retryOpts, ignoreRobotDisallow } : null;
   const summaryOnly = flags.has('summary-only'); // rebuild CSV + summary log from the cache, no scraping
   if (summaryOnly && retry) throw new Error(`--summary-only rebuilds outputs without crawling; it can't be used with --${RETRY_FLAGS.filter((f) => flags.has(f)).join(', --')}`);
+  const includeInterrupted = flags.has('include-interrupted');
+  if (includeInterrupted && !summaryOnly) throw new Error('--include-interrupted goes with --summary-only: it rebuilds the outputs of unfinished lists from their stored results');
   const newOnly = flags.has('new-only'); // keep the cache, scrape only the sites in the input that aren't in it
   if (newOnly && flags.has('force')) throw new Error("--new-only keeps the cache and --force scrapes everything again; use one");
   if (newOnly && summaryOnly) throw new Error("--summary-only rebuilds outputs without crawling; it can't be used with --new-only");
@@ -53,7 +55,7 @@ async function main() {
   if (legacy.length && !dryRun) migrate(store);
   const beginRun = (options: unknown) => { if (!dryRun) store.runs.append({ type: 'run.start', run: runId, pid: process.pid, argv: process.argv.slice(2), options, node: process.version }); };
   if (flags.has('unique')) {
-    const other = ['force', 'new-only', ...RETRY_FLAGS, 'summary-only', 'quick', 'check-mx', 'revalidate', 'dry-run', 'ignore-robot-disallow'].filter((f) => flags.has(f));
+    const other = ['force', 'new-only', ...RETRY_FLAGS, 'summary-only', 'include-interrupted', 'quick', 'check-mx', 'revalidate', 'dry-run', 'ignore-robot-disallow'].filter((f) => flags.has(f));
     if (other.length) throw new Error(`--unique only combines existing outputs; it can't be used with --${other.join(', --')}`);
     beginRun({ filter });
     runUnique(store, fileArgs, filter);
@@ -131,11 +133,11 @@ async function main() {
       continue;
     }
     if (dryRun) {
-      log.info({ input: path.relative(ROOT, f) }, previewFile(store, f, layout, retry, summaryOnly, newOnly, filter));
+      log.info({ input: path.relative(ROOT, f) }, previewFile(store, f, layout, retry, summaryOnly, newOnly, filter, includeInterrupted));
       continue;
     }
     try {
-      await withLogContext({ file: layout.id }, () => processFile(store, f, layout, opts, retry, summaryOnly, newOnly));
+      await withLogContext({ file: layout.id }, () => processFile(store, f, layout, opts, retry, summaryOnly, newOnly, includeInterrupted));
     } catch (err) {
       // One unreadable or broken file never stops the others.
       failedFiles++;

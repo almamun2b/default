@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { SiteResult } from '../src/crawler.js';
 import { readSites } from '../src/input.js';
-import { assignRows, recheckSite } from '../src/output.js';
+import { assignRows, loadDomainBusiness, recheckSite } from '../src/output.js';
 import { Db } from '../src/db/open.js';
 import { IN_DIR, OUT_DIR } from '../src/paths.js';
 
@@ -44,6 +44,7 @@ function oldCredit(sites: string[], done: Map<string, SiteResult>): Map<string, 
   return credit;
 }
 
+loadDomainBusiness(db);
 let rows = 0;
 const dropped: string[] = [];
 const decoded: string[] = [];
@@ -81,7 +82,8 @@ for (const { group, base, generation, id } of files) {
     const was = before.get(email);
     if (was && was !== site) moved.push(`${id}: ${email}  ${new URL(was).hostname} → ${new URL(site).hostname}`);
   }
-  if (out.kinds.input) named.push(`${id}: ${out.kinds.input} row(s) now named from the input's name column`);
+  const k = out.kinds;
+  named.push(`${id}: ${k.person} person, ${k.department} department title, ${k.mailbox} business + mailbox, ${k.input} input name, ${k.business} business name, ${k.domain} email domain`);
 }
 
 const show = (title: string, list: string[]) => {
@@ -96,4 +98,4 @@ show('Person names removed', nameLost);
 show('Person names changed', nameChanged);
 show('Person names added', nameGained);
 show('Emails credited to a different site', moved);
-show('Input names used', named);
+show('How rows are named', named);

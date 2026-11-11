@@ -6,5 +6,5 @@ logs
 .env
 __pycache__
 # local Foursquare OS Places cache (parquet, scripts/fsq-places.py extract)
-data/
+/data/
 

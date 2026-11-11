@@ -1,7 +1,7 @@
 import * as cheerio from 'cheerio';
 import type { CheerioAPI } from 'cheerio';
 import { makeBrowserFetcher, firstLine, type Fetched, type Fetcher, type Validators } from './browser.js';
-import { businessName, demoteRolePrefixes, extractFromDom, isGenericTitle, looksJsRendered, type EmailSource, type Found } from './extract.js';
+import { businessName, demoteRolePrefixes, demoteSharedPageNames, extractFromDom, isGenericTitle, looksJsRendered, type EmailSource, type Found } from './extract.js';
 import { httpGet, type FailKind } from './http.js';
 import { log } from './logger.js';
 import { allowed, blockReason, loadRobots, robotsAllow, sitemapsOf, type RobotsBlock, type RobotsRules } from './robots.js';
@@ -566,6 +566,7 @@ export async function scrapeSite(site: string, options: Partial<CrawlOptions> = 
     r.business = businessName(homeHtml, homeHost);
     r.emails = [...all].map(toFound);
     demoteRolePrefixes(r.emails);
+    demoteSharedPageNames(r.emails);
     return r;
   };
 
@@ -693,6 +694,7 @@ export async function resumeSite(prev: SiteResult, parts: ResumeParts, options: 
     const err = error ?? (signal?.aborted ? 'timeout' : undefined);
     if (err) result.error = err;
     demoteRolePrefixes(result.emails);
+    demoteSharedPageNames(result.emails);
     return result;
   };
 
@@ -746,5 +748,6 @@ export function mergeResults(prev: SiteResult, next: SiteResult): SiteResult {
   };
   for (const k of ['v', 'error', 'reused', 'rateLimited', 'budgetQueued', 'capQueued', 'resume'] as const) if (out[k] === undefined) delete out[k];
   demoteRolePrefixes(out.emails);
+  demoteSharedPageNames(out.emails);
   return out;
 }

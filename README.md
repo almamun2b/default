@@ -115,7 +115,7 @@ websites/car-dealers-au/ford.au.csv   ──►   results/emails/car-dealers-au/
 
 | Column | Meaning |
 |---|---|
-| `name` | Best name for the email, in this order: **person name** if one is clearly tied to the email, then the **department page title** (e.g. `Audiology — Auckland`), then the **input's own name** for the site (when the input has a name column), then the **business name** scraped from the site |
+| `name` | Best name for the email, never blank: a **person name** if one is clearly tied to the email, else the **business it belongs to** (the input's own name or the scraped business name for the site's own addresses, the domain for another company's), with a branch or department mailbox appended (`Acme Electrical - Geebung`), or the **department page title** (e.g. `Audiology — Auckland`) for a role mailbox on a section's sub-page. See "How names are chosen" |
 | `email` | The email address, lower-cased |
 | `website` | The website URL from the input CSV |
 | `link` | The page the email was found on |
@@ -186,6 +186,7 @@ results/emails/car-dealers-au/unique/car-dealers-au.exclude-suffix-de-edu-gov.cs
 | `npm run scrape -- --retry-budget-queued` | Continue the sites that ran out of time budget from where they stopped: only the pages still queued are fetched, with the per-site budget of `--budget` |
 | `npm run scrape -- --retry-capped --max-pages=N` | Continue the sites that reached the page cap from their saved queue, up to the higher cap `N` (the summary's `Capped` line) |
 | `npm run scrape -- --summary-only` | Scrape nothing. Rebuild the CSVs and summaries from the stored results, applying the current email and name rules. Skips (and leaves untouched) a file with no cache or an interrupted scrape |
+| `npm run scrape -- --summary-only --include-interrupted [file …]` | Same, but also for lists whose scrape never finished, from the sites stored so far. Check the `N of M stored` count first with `--dry-run`: a list with most of its sites still to scrape gives a partial CSV. The list stays marked unfinished, so the next scrape still resumes it |
 | `npm run scrape -- --summary-only --check-mx` | Same, and drop emails whose domain can't receive mail (no MX or address record in DNS). `--check-mx` works with any scrape too |
 | `npm run scrape -- --dry-run` | Show what a command would do with each file (scrape, resume, retry, skip), plus leftover markers and locks. Scrapes and writes nothing under `results/` |
 | `npm run scrape -- --help` | List every option |
@@ -494,7 +495,7 @@ After each CSV is processed, a summary is printed and **recorded** in `results/d
 ```
 [2026-09-29 13:49:30] veterinarians.nz.csv  (scrape, took 38m 12s)
   Websites : 72 total | 53 with emails | 14 no emails found | 5 failed
-  Emails   : 241 unique (51 person name, 0 department page title, 120 input name, 70 business name)
+  Emails   : 241 unique (51 person name, 0 department page title, 30 business + mailbox, 100 input name, 40 business name, 20 email domain)
   Crawl    : 3919 pages fetched | headless browser used on 17 sites
   Failures : unreachable=5 (dns=3, http-403=2)
   Out of time: 2 site(s) ran out of time budget with 317 page(s) still queued: vetent.co.nz (176), carevets.co.nz (141); continue them with --retry-budget-queued (per-site budget: --budget=MIN)
@@ -629,10 +630,25 @@ Junk is filtered out: image names like `logo@2x.png`, placeholders (`you@example
 
 ### 4. Pick a name
 
-1. **Person name:** from a schema.org `Person`, from `mailto:` link text, or from a nearby heading in the same "card". It must match the email by whole words: a name word equals a part of the local part, or the local part is a usual form like `jsmith`, `janes` or `smithj` for `Jane Smith`, or the name has a title such as `Dr`. Names made only of department words (`Customer Care`) never count. As a last resort a name comes from the local part itself (`mary.jones@` → `Mary Jones`), but only when its first part is a known given name (`src/data/given-names.txt`) and no part is a department word. So `used.cars@` or `customer.relations@` get the business name instead. When one first part appears with five or more different second parts on one site (`bec.brisbane@`, `bec.cairns@`, …), those are branch mailboxes, not people. Generic mailboxes (`info@`, `reception@`, `admin@`, …) never get a person name.
+1. **Person name:** from a schema.org `Person` (JSON-LD or microdata; the name goes only to that Person's own addresses, an `email` array included, never to the other emails on the page), from `mailto:` link text, or from a nearby heading in the same "card". It must match the email by whole words: a name word equals a part of the local part (a role word such as `president` doesn't count), or the local part is a usual form like `jsmith`, `janes` or `smithj` for `Jane Smith`, or the name has a title such as `Dr` and the address is neither a role mailbox (`bishop@`, `vicar.general@`) nor another person's first name. Names made only of department words (`Customer Care`) never count. One page name on several addresses of a site stays only on those that match it. As a last resort a name comes from the local part itself, only when its first part is a known given name (`src/data/given-names.txt`) and nothing is a department, role or place word: `mary.jones@` → Mary Jones, `paul.wu@`, `rachel.b@`, `johnh@` → John H, `alex@` → Alex (not when the word is the email's own domain, `preston@prestonmazda.com.au`). When one first part appears with five or more different second parts on one site (`bec.brisbane@`, `bec.cairns@`, …), those are branch mailboxes, not people. Generic mailboxes (`info@`, `reception@`, `admin@`, …) never get a person name.
 2. **Department page title:** the `<h1>` of a sub-page, used only in [section-focused crawls](#section-focused-crawling). Generic titles such as "Contact Us" or "About" don't count.
 3. **Input name:** the input CSV's own name for the site, when it has a name column.
 4. **Business name:** from JSON-LD `Organization`/`LocalBusiness`, then `og:site_name`, then the cleaned `<title>`, then the domain. "Home", "Welcome" and similar are skipped, "Welcome to " is dropped from the front, and an address after a comma is cut off.
+
+### How names are chosen
+
+The four sources above are the ingredients; which one a row gets depends on the email's domain. Each email is classified by its domain: **own** (the site's registrable domain; the landing page's too, unless it is on an unrelated domain such as `change.org` for `bestbitepizza.com.au`, which the summary lists under `Redirects`), **free mail** (`src/data/free-mail-domains.txt`) or **another company's**. Then, the first that applies:
+
+| Email | Name |
+|---|---|
+| A person is found (above) | the person |
+| Own, branch/place/department mailbox (`geebung@`, `customer.relations@`) or a role (`marketing@`, `customerservice@`) | `Business - Mailbox` (`Acme Electrical - Geebung`, `Anytime Fitness - Marketing`). The business comes first: it is the reliable part and keeps one organisation's rows together |
+| Own, bare or junk mailbox (`info@`, `admin@`, `office@`, `0zbi@`: names no function) | the department page title on a section sub-page (at most 3 emails on that page), else the business: the input's name column, else the scraped business name (outside a section the input points at: the scraped one) |
+| Free mail on the site's home/contact/about/team pages, or a site with at most 2 free-mail addresses | like an own address |
+| Other free mail | the mailbox tidied (`debcopeland88@gmail.com` → Debcopeland), or the domain (`qq.com`) for a junk or role mailbox |
+| Another company's | the list's own site for that domain, else a site of that domain scraped for any list (its business name), else the domain's first label as words (`anytimefitness.in` → Anytime Fitness, `clmnz.co.nz` → CLMNZ); a mailbox or role is appended. A domain with the same first label as the site's (`smashtennis.co.nz` on `smashtennis.nz`) is the site's own |
+
+The scraped business name comes from the landing page: JSON-LD organisation, `og:site_name`, `application-name`, the `<title>` segment matching the domain, the logo image's alt text, the footer's `© Name`, then another title segment, then the host. Bot-check, error and parked page titles (`Just a moment...`), URLs and phone numbers are never a name. Words that make a mailbox a role or office rather than a person are in `src/data/role-words.txt` (with `DEPT_WORDS` in `extract.ts`); places that are also given names in `src/data/place-words.txt`. Run-together words (`anytimefitness`, `customerservice@`, `lynfieldfitness@`) are cut into words with `src/data/name-words.txt`, and `julieweller@` / `jsmith@` are read as Julie Weller / J Smith with `surnames.txt`. Where each list comes from, with licences: `src/data/SOURCES.md`; `npx tsx scripts/build-word-lists.ts --from <downloads>` rebuilds them.
 
 ### Section-focused crawling
 
@@ -661,7 +677,7 @@ Most limits are command-line options; see [Crawl options](#crawl-options-depth-a
 | `HTTP_TIMEOUT` | `src/http.ts` | 15 s | Per-request timeout |
 | `MAX_BYTES` | `src/http.ts` | 5 MB | Max page size |
 
-The heuristics are all in `src/extract.ts`: junk filters, generic mailbox names, words that are never part of a person's name (`DEPT_WORDS`), and the given-name list in `src/data/given-names.txt`.
+The heuristics are in `src/extract.ts` (junk filters, generic mailbox names, words that are never part of a person's name (`DEPT_WORDS`), the person rules) and `src/output.ts` (which name each row gets), with word lists in `src/data/` (`given-names.txt`, `surnames.txt`, `places.txt`, `name-words.txt`, `role-words.txt`, `place-words.txt`, `free-mail-domains.txt`; sources in `SOURCES.md`).
 
 After changing them, check the effect on everything scraped so far (reads the database, writes nothing):
 
@@ -683,7 +699,7 @@ Link priority keywords (`PRIORITY_PATH`), the listing-page penalty (`LISTING_SEG
 - A site is limited by its 20-minute budget (and by `--max-pages` if you set one), so emails on deep pages can be missed on very large sites. Contact-like pages are fetched first and listing pages last to reduce this, and `--retry-budget-queued` / `--retry-capped` can continue them later.
 - The browser follows redirects inside Chromium, so a redirect hop there is checked against `robots.txt` only after it loads (its page is then discarded).
 - Sites whose `robots.txt` forbids generic crawlers are skipped by design.
-- Name detection is heuristic. When it isn't confident, it falls back to the business name rather than guessing. People whose first name isn't in the given-name list only get a person name when the page itself ties the name to the email.
+- Name detection is heuristic. When it isn't confident, it falls back to the business name (or the email's domain) rather than guessing. People whose first name isn't in the given-name list only get a person name when the page itself ties the name to the email.
 - Aggregator and government sites often list emails belonging to other organisations. Those rows are credited to the site they were found on, unless another input site owns the email's domain. A dealer group's email shown on several dealer sites in the list is credited to the first of them when none of those sites is on the group's domain.
 
 ## Responsible use
@@ -713,9 +729,9 @@ src/
   netguard.ts   Refuses private, loopback and metadata addresses; the DNS lookup HTTP connections use
   extract.ts    Email extraction, junk filtering, person/business name detection
   urls.ts       URL normalisation, crawlability rules, link priority, section detection
-  data/         given-names.txt
+  data/         word lists (given-names, surnames, places, name-words, role-words, place-words, free-mail-domains) + SOURCES.md
 test/           node:test suites and a local test server (npm test)
-scripts/        recheck-cache.ts, given-names-report.ts, mark-budget-from-logs.ts, db-migrate.ts, db-verify.ts
+scripts/        recheck-cache.ts, given-names-report.ts, build-word-lists.ts, mark-budget-from-logs.ts, db-migrate.ts, db-verify.ts
 websites/       Input CSVs, in category folders: websites/<category>/*.csv (git-ignored)
 results/        db/ (the database) and emails/<category>/ (the output CSVs, plus filtered/ and unique/) (git-ignored)
 logs/           Diagnostic JSON logs: scraper-<date>.log, error-<date>.log (git-ignored)

@@ -110,6 +110,14 @@ export function sectionPrefix(input: URL, landing: URL): string | null {
   return inputHasPath || crossDomain || deep ? path : null;
 }
 
+const CONTACT_PATH = /(contact|get-in-touch|enquir|find-us|about|team|staff|meet|people)/i;
+
+/** The home page, or a contact / about / team page: where a site lists its own addresses. */
+export function isContactPage(url: URL): boolean {
+  const p = url.pathname.replace(/\/+$/, '');
+  return p === '' || /^\/(index|default|home)(\.[a-z]+)?$/i.test(p) || CONTACT_PATH.test(p);
+}
+
 /** Lower = fetched sooner. */
 export function priority(url: URL, depth: number, section?: string | null): number {
   let p = url.pathname;

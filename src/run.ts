@@ -12,7 +12,7 @@ import { filterRows, filterSummary, filterTag, type SuffixFilter } from './filte
 import { readSites } from './input.js';
 import { undeliverable } from './mx.js';
 import { log, runId, withLogContext } from './logger.js';
-import { assignRows, recheckSite, uniqueLabel, uniqueRows, type Assigned, type Row } from './output.js';
+import { assignRows, loadDomainBusiness, recheckSite, uniqueLabel, uniqueRows, type Assigned, type Row } from './output.js';
 import { crossUniqueDir, fileLayout, findOutputs, groupOf, OUT_DIR, ROOT, type FileLayout } from './paths.js';
 import { baseHost } from './urls.js';
 
@@ -138,6 +138,7 @@ export async function filterFile(db: Db, file: string, layout: FileLayout, opts:
     const input = readSites(file);
     if (!input.sites.length) return;
     const { checked } = await checkedResults(stored, !!opts.checkMx);
+    loadDomainBusiness(db);
     writeFiltered(db, layout, assignRows(input.sites, checked, input.names).rows, opts.filter);
   } finally {
     release();
@@ -182,9 +183,12 @@ function summarize(layout: FileLayout, sites: string[], done: Map<string, SiteRe
   const lines = [
     `[${stamp}] ${layout.id}.csv  (${mode}, took ${fmtDuration(Date.now() - startedAt)})`,
     `  Websites : ${sites.length} total | ${withEmails.length} with emails | ${noEmails.length} no emails found | ${failed.length} failed`,
-    `  Emails   : ${uniqueEmails} unique (${k.person} person name, ${k.department} department page title, ${k.input} input name, ${k.business} business name)`,
+    `  Emails   : ${uniqueEmails} unique (${k.person} person name, ${k.department} department page title, ${k.mailbox} business + mailbox, ${k.input} input name, ${k.business} business name, ${k.domain} email domain)`,
     `  Crawl    : ${fetched} pages fetched${reused ? ` + ${reused} reused (already scraped, not requested again)` : ''} | headless browser used on ${results.filter((r) => r.usedBrowser).length} sites`,
   ];
+  if (out.redirects.length) {
+    lines.push(`  Redirects: ${out.redirects.length} site(s) land on an unrelated domain; that domain's emails are named by their own domain, not by the input site: ${out.redirects.slice(0, 5).join(', ')}${out.redirects.length > 5 ? ', …' : ''}`);
+  }
   if (mxDropped) {
     const list = mxDropped.slice(0, 5).join(', ') + (mxDropped.length > 5 ? ', …' : '');
     lines.push(`  MX check : ${mxDropped.length ? `${mxDropped.length} email(s) dropped, their domain can't receive mail: ${list}` : "every email's domain can receive mail"}`);
@@ -228,17 +232,18 @@ function summarize(layout: FileLayout, sites: string[], done: Map<string, SiteRe
  * `retry` is set for a --retry-* run: only the sites it selects are crawled, the rest come from the stored results.
  * `newOnly` keeps the stored results of a finished run too, so only sites that aren't in them are crawled.
  */
-export async function processFile(db: Db, file: string, layout: FileLayout, opts: RunOptions, retry: RetryFlags | null, summaryOnly = false, newOnly = false): Promise<void> {
+export async function processFile(db: Db, file: string, layout: FileLayout, opts: RunOptions, retry: RetryFlags | null, summaryOnly = false, newOnly = false, includeInterrupted = false): Promise<void> {
   const startedAt = Date.now();
   const { group: cat, base: list, outFile } = layout;
   const rel = (f: string) => path.relative(ROOT, f);
   const interrupted = !!db.runs.interrupted(cat, list);
 
   if (summaryOnly) {
-    if (interrupted) {
-      log.warn({ input: rel(file) }, `Skipping ${layout.id}: its last scrape was interrupted. Resume it first (re-run the scrape), then rebuild`);
+    if (interrupted && !includeInterrupted) {
+      log.warn({ input: rel(file) }, `Skipping ${layout.id}: its last scrape was interrupted. Resume it first (re-run the scrape), then rebuild (or --include-interrupted rebuilds it from what is stored)`);
       return;
     }
+    if (interrupted) log.warn({ input: rel(file) }, `${layout.id}: its scrape was interrupted; rebuilding from the sites stored so far. It stays marked unfinished, so the next scrape resumes it`);
     if (!db.sites.loadList(cat, list).size) {
       log.warn({ input: rel(file) }, `Skipping ${layout.id}: no stored results to rebuild from, so ${rel(outFile)} is left untouched`);
       return;
@@ -324,6 +329,7 @@ export async function processFile(db: Db, file: string, layout: FileLayout, opts
 
     // Outputs use the current rules even for stored rows; the database keeps what was scraped.
     const { checked, mxDropped } = await checkedResults(done, !!opts.checkMx);
+    loadDomainBusiness(db);
     const assigned = assignRows(sites, checked, input.names);
     const { rows } = assigned;
     writeCsv(outFile, rows);
@@ -334,7 +340,8 @@ export async function processFile(db: Db, file: string, layout: FileLayout, opts
     const summary = summarize(layout, sites, checked, assigned, mode, startedAt, mxDropped);
     if (opts.filter) writeFiltered(db, layout, rows, opts.filter);
     // The end of the list. A scrape cut off before this line is resumed by the next run.
-    db.runs.append({
+    // A summary of an interrupted list leaves it interrupted (no list.end), so the next scrape still resumes it.
+    if (!(summaryOnly && interrupted)) db.runs.append({
       type: 'list.end', run: runId, cat, list, generation: who.generation, status: 'finished', mode: summaryOnly ? 'summary' : retried.length ? 'retry' : newOnly ? 'new-only' : 'scrape',
       durationMs: Date.now() - startedAt, csv: rel(outFile), counts: summary.counts, reasons: summary.reasons, text: summary.text,
     });
@@ -419,12 +426,12 @@ export function runUnique(db: Db, fileArgs: string[], filter?: SuffixFilter): vo
 }
 
 /** --dry-run: what processFile would do with one file. Reads the input and the database; writes nothing and takes no lock. */
-export function previewFile(db: Db, file: string, layout: FileLayout, retry: RetryFlags | null, summaryOnly: boolean, newOnly = false, filter?: SuffixFilter): string {
-  const text = previewBase(db, file, layout, retry, summaryOnly, newOnly);
+export function previewFile(db: Db, file: string, layout: FileLayout, retry: RetryFlags | null, summaryOnly: boolean, newOnly = false, filter?: SuffixFilter, includeInterrupted = false): string {
+  const text = previewBase(db, file, layout, retry, summaryOnly, newOnly, includeInterrupted);
   return filter && !/would (be )?skipped?|would fail/.test(text) ? `${text}; then would write the filtered CSV ${path.relative(ROOT, filteredPath(layout, filter))}` : text;
 }
 
-function previewBase(db: Db, file: string, layout: FileLayout, retry: RetryFlags | null, summaryOnly: boolean, newOnly: boolean): string {
+function previewBase(db: Db, file: string, layout: FileLayout, retry: RetryFlags | null, summaryOnly: boolean, newOnly: boolean, includeInterrupted = false): string {
   const { group: cat, base: list } = layout;
   let input: ReturnType<typeof readSites>;
   try {
@@ -442,7 +449,7 @@ function previewBase(db: Db, file: string, layout: FileLayout, retry: RetryFlags
   const interrupted = !!db.runs.interrupted(cat, list);
   const hasOutput = fs.existsSync(layout.outFile);
   if (summaryOnly) {
-    if (interrupted) return `${layout.id}: its last scrape was interrupted; would be skipped (resume it first)`;
+    if (interrupted && !includeInterrupted) return `${layout.id}: its last scrape was interrupted; would be skipped (resume it first, or --include-interrupted)`;
     if (!done.size) return `${layout.id}: no stored results to rebuild from; would be skipped`;
     return `${layout.id}: would rebuild the CSV and summary from ${cached} of ${n} stored sites${skipped}`;
   }
