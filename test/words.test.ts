@@ -25,3 +25,14 @@ test('digits: one or two stay on the letters before them, a longer number is its
   assert.equal(nameFromDomain('t4arb.com'), 'T4 Arb');
   assert.equal(nameFromDomain('ericadams2021.com'), 'Eric Adams 2021');
 });
+
+test('a label that starts with a number: ordinals, 4x4, 4WD and short codes keep it together', () => {
+  assert.equal(nameFromLabel('2ndavenue'), '2nd Avenue');
+  assert.equal(nameFromLabel('19thave'), '19th Ave');
+  assert.equal(nameFromLabel('11thavenue'), '11th Avenue');
+  assert.equal(nameFromLabel('4x4megastore'), '4x4 Mega Store');
+  assert.equal(nameFromLabel('4wdsupacentre'), '4WD Supa Centre');
+  assert.equal(nameFromLabel('2xu'), '2XU');
+  assert.equal(nameFromLabel('8limos'), '8 Limos');
+  assert.equal(nameFromLabel('2stop'), '2 Stop'); // "2st" is no ordinal
+});

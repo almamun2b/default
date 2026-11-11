@@ -167,3 +167,14 @@ test('names: on a host shared by many list sites, another site\'s person page do
   const rows = names(pages, done, new Map(pages.map((s, i) => [s, ['Jane Roe (Senator)', 'Sam Poe (Senator)', 'Tim Moe (Senator)'][i]])));
   assert.deepEqual(rows, [['senator.bell@aph.gov.au', 'Aph - Senator Bell'], ['jane.roe.sen@aph.gov.au', 'Jane Roe Sen']]);
 });
+
+test('names: a mistyped suffix after the site\'s own name is still the site\'s own, never "0 RG"', () => {
+  const s = 'http://www.northshorecountryclub.com.au/', end = 'https://www.northshore.org.au/';
+  const done = new Map([[s, site(s, { finalUrl: end, business: 'North Shore Community Hub', emails: [
+    e('enquiries@northshorecountryclub.0rg.au', end + 'membership/'), e('marketing@northshorecountryclub.0rg.au', end + 'membership/'),
+  ] })]]);
+  assert.deepEqual(names([s], done), [
+    ['enquiries@northshorecountryclub.0rg.au', 'North Shore Community Hub'],
+    ['marketing@northshorecountryclub.0rg.au', 'North Shore Community Hub - Marketing'],
+  ]);
+});

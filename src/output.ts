@@ -125,7 +125,13 @@ function siteContext(site: string, r: SiteResult, input: string | undefined): Si
   };
 }
 
-const isOwn = (ctx: SiteCtx, domain: string) => ctx.own.has(domain) || ctx.labels.has(domain.split('.')[0]);
+/**
+ * Whether `domain` (registrable) is the site's own. `host` is the full email host: a label in front of the registrable
+ * domain that is the site's own name ("northshorecountryclub.0rg.au", a mistyped ".org.au" on northshorecountryclub.com.au) counts too.
+ */
+const isOwn = (ctx: SiteCtx, domain: string, host = domain) =>
+  ctx.own.has(domain) || ctx.labels.has(domain.split('.')[0]) ||
+  host.toLowerCase().split('.').slice(0, -domain.split('.').length).some((l) => ctx.labels.has(l));
 
 /** "Org - Local", or just Org when the local part only repeats it. */
 const withLocal = (org: string, local: string) => (letters(org).includes(letters(local)) || letters(local).includes(letters(org)) ? org : `${org} - ${local}`);
@@ -174,7 +180,7 @@ export function assignRows(sites: string[], done: Map<string, SiteResult>, input
 
     const link = url(e.link);
     const inSect = !!(ctx.section && link && inSection(link, ctx.section));
-    const linkOwn = !!link && (isOwn(ctx, regDomain(link.hostname)) || inSect);
+    const linkOwn = !!link && (isOwn(ctx, regDomain(link.hostname), link.hostname) || inSect);
     // the site's own name for the business: the input's; outside the section it was given for, the whole domain's (never the section's name)
     const siteOrg = (d: string): { name: string; kind: NameKind } => {
       if (ctx.input && (!ctx.section || inSect || !linkOwn)) return { name: ctx.input, kind: 'input' };
@@ -186,7 +192,7 @@ export function assignRows(sites: string[], done: Map<string, SiteResult>, input
     };
     let org: { name: string; kind: NameKind } | null = null;
     let siteOwn = false;
-    if (isOwn(ctx, edom)) {
+    if (isOwn(ctx, edom, domain)) {
       // On a host shared by many list sites the input name of the site an email is credited to names it only when they share a word
       const mine = new Set(letters3(ctx.input ?? ''));
       const shared = (crowd.get(edom) ?? 0) >= 3 && !letters3(e.email.slice(0, at)).some((t) => mine.has(t));
@@ -213,8 +219,8 @@ export function assignRows(sites: string[], done: Map<string, SiteResult>, input
   const main: (Seen & { row: Row })[] = [];
   const kinds: Record<NameKind, number> = { person: 0, department: 0, input: 0, business: 0, mailbox: 0, domain: 0 };
   for (const [email, seen] of byEmail) {
-    const own = regDomain(email.slice(email.indexOf('@') + 1));
-    const owner = seen.find((x) => isOwn(ctxs.get(x.site)!, own));
+    const host = email.slice(email.indexOf('@') + 1), own = regDomain(host);
+    const owner = seen.find((x) => isOwn(ctxs.get(x.site)!, own, host));
     const pick = owner ?? seen.find((x) => x.e.source !== 'raw') ?? seen[0];
     const { name, kind } = nameOf(pick);
     const row: Row = [safeCell(name || email.slice(email.indexOf('@') + 1)), email, pick.r.site, pick.e.link ?? ''];

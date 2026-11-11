@@ -70,11 +70,30 @@ function runName(run: string): string {
   return vowels === 0 || run.length === 2 || (run.length === 4 && vowels <= 1) ? run.toUpperCase() : cap(run); // PCYC, CLMNZ, YMCA; "bega", "obrien" stay words
 }
 
+/** The right ordinal ending for a number ("2" → "nd", "11" → "th"). */
+const ordinal = (n: string): string => {
+  const k = Number(n.slice(-2));
+  return k >= 11 && k <= 13 ? 'th' : ({ 1: 'st', 2: 'nd', 3: 'rd' } as Record<number, string>)[k % 10] ?? 'th';
+};
+
+/** One piece of a label that starts with a number ("2ndavenue" → 2nd Avenue, "4x4megastore" → 4x4 Mega Store, "4wd…" → 4WD, "2xu" → 2XU, "8limos" → 8 Limos). */
+function numberedName(part: string): string[] | null {
+  let m = /^(\d+)(st|nd|rd|th)([a-z]*)$/.exec(part);
+  if (m && m[2] === ordinal(m[1])) return [m[1] + m[2], ...(m[3] ? [runName(m[3])] : [])];
+  m = /^(\d+x\d+)([a-z]*)$/.exec(part);
+  if (m) return [m[1], ...(m[2] ? [runName(m[2])] : [])];
+  m = /^(\d+)wd([a-z]*)$/.exec(part);
+  if (m) return [m[1] + 'WD', ...(m[2] ? [runName(m[2])] : [])];
+  m = /^(\d{1,2})([a-z]{1,3})$/.exec(part);
+  if (m) return [m[1] + m[2].toUpperCase()]; // too short to be a word: a code ("2XU", "3AT")
+  return null;
+}
+
 /** "customerservice" → "Customer Service", "autohaus-pickel" → "Autohaus Pickel", "clmnz" → "CLMNZ". */
 export function nameFromLabel(label: string): string {
   return label.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
     // one or two digits stay on the letters before them ("q1", "t4 Arb"); a longer number is its own word
-    .flatMap((part) => (part.match(/[a-z]+(?:\d{1,2}(?!\d))?|\d+/g) ?? []).flatMap((p) => {
+    .flatMap((part) => numberedName(part) ?? (part.match(/[a-z]+(?:\d{1,2}(?!\d))?|\d+/g) ?? []).flatMap((p) => {
       const m = /^([a-z]+)(\d{1,2})$/.exec(p);
       return /^\d+$/.test(p) ? [p] : m ? [runName(m[1]) + m[2]] : [runName(p)];
     }))
